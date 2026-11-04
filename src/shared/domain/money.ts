@@ -1,4 +1,5 @@
 import Decimal from "decimal.js";
+import { DomainError } from "./domain-error";
 
 const MoneyDecimal = Decimal.clone({ precision: 34 });
 
@@ -7,17 +8,19 @@ export interface MoneyProps {
   currency: string;
 }
 
-export class InvalidMoneyError extends Error {
+export class InvalidMoneyError extends DomainError {
+  override readonly code = "INVALID_MONEY";
+
   constructor(message: string) {
     super(message);
-    this.name = "InvalidMoneyError";
   }
 }
 
-export class CurrencyMismatchError extends Error {
+export class CurrencyMismatchError extends DomainError {
+  override readonly code = "CURRENCY_MISMATCH";
+
   constructor(expected: string, received: string) {
     super(`currency mismatch: expected ${expected}, received ${received}`);
-    this.name = "CurrencyMismatchError";
   }
 }
 
