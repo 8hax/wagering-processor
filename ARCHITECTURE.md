@@ -32,19 +32,13 @@ A principal alternativa seria armazenar valores em centavos inteiros (`2500` em 
 
 ### D5 — Formato e limites do `Money`
 
-<!-- 1. Formato rígido: por que aceitar só "25.00", e não "25" ou "25.5"?
-     2. Limite de tamanho: por que no máximo 17 dígitos inteiros? Com o que esse número está alinhado?
-        O que aconteceria sem o limite? (Lembre da precisão padrão da decimal.js.)
-     3. Validação da moeda: o que ela verifica e o que ela não verifica? Por que isso basta neste desafio?
-     4. Defesa em profundidade: por que o Money verifica o typeof, se o TypeScript já declara amount como string? -->
+O `Money` aceita apenas o formato rígido do contrato: parte inteira, ponto e exatamente duas casas decimais (`"25.00"`). Entradas como `"25"` ou `"25.5"` são rejeitadas. O README define escala fixa de 2 casas, e o formato único torna o contrato inequívoco — o provedor sabe exatamente o que enviar — e simplifica a validação. A validação é feita por expressão regular, como allowlist: só o que segue o padrão é aceito. Delegar a validação à decimal.js não bastaria, pois ela aceita entradas como `"Infinity"` e `"1e3"`.
 
-Para o modulo Money, foi escolhido um formato rígido, aceitando apenas a mascara "xx.yy", como "25.00" e não "25" ou "25.5", isso garante estabilidade no recolhimento de dados para seu processamento, padronizando e garantindo que não haja erros.
+O valor máximo é de 17 dígitos inteiros (`99999999999999999.99`), alinhado com a coluna `NUMERIC(19, 2)` do banco: domínio e persistência aceitam exatamente o mesmo intervalo. Além disso, a decimal.js trabalha por padrão com 20 dígitos significativos e arredonda silenciosamente resultados maiores, o que causaria perda de valores. Por isso, o `Money` usa uma instância própria da biblioteca (`Decimal.clone`) com precisão de 34 dígitos, sem alterar a configuração global.
 
-Já o tamanho maximo de 17 digitos se da por conta da biblioteca decimal.js que trabalha por padrão com 20 digitos significativos. Ou seja, em operações de plus ou minus, um resultado com mais digitos que isso é arredondado em silencio, causando uma perca de valores no sistema financeiro.
+A moeda é validada apenas pelo formato: três letras maiúsculas, no padrão ISO-4217. Códigos inexistentes, como `"XYZ"`, passariam pela validação. Isso é suficiente neste desafio, que opera apenas em BRL, e o modelo permanece multi-moeda.
 
-
-
-
+O `Money` verifica o tipo dos valores em tempo de execução (`typeof`), mesmo com o TypeScript declarando `amount` como string. Os tipos do TypeScript são removidos na execução, e um provedor pode enviar o valor como número no JSON (`"amount": 25.55`). Sem a verificação, a expressão regular converteria esse número em texto e o aceitaria. A camada HTTP também valida a entrada, mas o domínio se protege por conta própria, como defesa em profundidade.
 
 ## 3. O que não foi implementado (e como seria feito)
 
