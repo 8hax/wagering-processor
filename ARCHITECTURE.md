@@ -40,6 +40,8 @@ A moeda é validada apenas pelo formato: três letras maiúsculas, no padrão IS
 
 O `Money` verifica o tipo dos valores em tempo de execução (`typeof`), mesmo com o TypeScript declarando `amount` como string. Os tipos do TypeScript são removidos na execução, e um provedor pode enviar o valor como número no JSON (`"amount": 25.55`). Sem a verificação, a expressão regular converteria esse número em texto e o aceitaria. A camada HTTP também valida a entrada, mas o domínio se protege por conta própria, como defesa em profundidade.
 
+Nas comparações, `equals` entre moedas diferentes retorna `false`, pois a pergunta "25 BRL é igual a 25 USD?" tem resposta: não. Já `isLessThan` lança `CurrencyMismatchError`, pois "10 BRL é menor que 25 USD?" não tem resposta sem uma taxa de câmbio, e retornar `true` ou `false` seria inventar um resultado. O zero negativo (`-0`), que a decimal.js representa, é sempre exibido como `"0.00"` e nunca é considerado negativo: um `"-0.00"` em um extrato não tem significado financeiro. Por isso, as consultas usam `greaterThan(0)` e `lessThan(0)`, em vez dos métodos `isPositive` e `isNegative` da biblioteca, que tratam o zero de forma diferente.
+
 ## 3. O que não foi implementado (e como seria feito)
 
 <!-- Preencher no final. -->

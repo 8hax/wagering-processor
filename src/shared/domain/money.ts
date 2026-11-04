@@ -1,6 +1,6 @@
 import Decimal from "decimal.js";
 
-const MoneyDecimal = Decimal.clone({ precision: 34})
+const MoneyDecimal = Decimal.clone({ precision: 34 });
 
 export interface MoneyProps {
   amount: string;
@@ -11,6 +11,13 @@ export class InvalidMoneyError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "InvalidMoneyError";
+  }
+}
+
+export class CurrencyMismatchError extends Error {
+  constructor(expected: string, received: string) {
+    super(`currency mismatch: expected ${expected}, received ${received}`);
+    this.name = "CurrencyMismatchError";
   }
 }
 
@@ -37,7 +44,59 @@ export class Money {
     return new Money(new MoneyDecimal(props.amount), props.currency);
   }
 
+  static zero(currency: string): Money {
+    return Money.from({ amount: "0.00", currency });
+  }
+
+  add(other: Money): Money {
+    this.assertSameCurrency(other);
+    return new Money(this.value.plus(other.value), this.currency);
+  }
+
+  subtract(other: Money): Money {
+    this.assertSameCurrency(other);
+    return new Money(this.value.minus(other.value), this.currency);
+  }
+
+  negate(): Money {
+    return new Money(this.value.negated(), this.currency);
+  }
+
+  isZero(): boolean {
+    return this.value.isZero();
+  }
+
+  isPositive(): boolean {
+    return this.value.greaterThan(0);
+  }
+
+  isNegative(): boolean {
+    return this.value.lessThan(0);
+  }
+
+  isLessThan(other: Money): boolean {
+    this.assertSameCurrency(other);
+    return this.value.lessThan(other.value);
+  }
+
+  equals(other: Money): boolean {
+    return this.currency === other.currency && this.value.equals(other.value);
+  }
+
+    toJSON(): MoneyProps {
+    return { amount: this.toString(), currency: this.currency };
+  }
+
   toString(): string {
+    if (this.value.isZero()) {
+      return "0.00";
+    }
     return this.value.toFixed(2);
+  }
+
+  private assertSameCurrency(other: Money): void {
+    if (other.currency !== this.currency) {
+      throw new CurrencyMismatchError(this.currency, other.currency);
+    }
   }
 }
