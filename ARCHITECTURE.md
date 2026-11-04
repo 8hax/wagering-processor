@@ -30,6 +30,22 @@ Exemplo obtido em teste: `1.005 * 100` resulta em `100.49999999999999`. Ao conve
 
 A principal alternativa seria armazenar valores em centavos inteiros (`2500` em vez de `"25.00"`). Optou-se pela biblioteca decimal por três motivos: o contrato da API já trafega strings decimais, o que evita conversões em toda entrada e saída; a representação é legível; e o próprio modelo de referência do desafio adota `Decimal`.
 
+### D5 — Formato e limites do `Money`
+
+<!-- 1. Formato rígido: por que aceitar só "25.00", e não "25" ou "25.5"?
+     2. Limite de tamanho: por que no máximo 17 dígitos inteiros? Com o que esse número está alinhado?
+        O que aconteceria sem o limite? (Lembre da precisão padrão da decimal.js.)
+     3. Validação da moeda: o que ela verifica e o que ela não verifica? Por que isso basta neste desafio?
+     4. Defesa em profundidade: por que o Money verifica o typeof, se o TypeScript já declara amount como string? -->
+
+Para o modulo Money, foi escolhido um formato rígido, aceitando apenas a mascara "xx.yy", como "25.00" e não "25" ou "25.5", isso garante estabilidade no recolhimento de dados para seu processamento, padronizando e garantindo que não haja erros.
+
+Já o tamanho maximo de 17 digitos se da por conta da biblioteca decimal.js que trabalha por padrão com 20 digitos significativos. Ou seja, em operações de plus ou minus, um resultado com mais digitos que isso é arredondado em silencio, causando uma perca de valores no sistema financeiro.
+
+
+
+
+
 ## 3. O que não foi implementado (e como seria feito)
 
 <!-- Preencher no final. -->
