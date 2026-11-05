@@ -7,7 +7,9 @@
     "dev": "bun --watch src/main.ts",
     "typecheck": "bun check",
     "migration:up": "bun src/infra/database/migrate.ts up",
-    "migration:down": "bun src/infra/database/migrate.ts down"
+    "migration:down": "bun src/infra/database/migrate.ts down",
+    "test:unit": "bun test src",
+    "test:integration": "bun test test/integration",
   },
   "devDependencies": {
     "@types/bun": "latest",
