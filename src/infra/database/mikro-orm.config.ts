@@ -1,6 +1,7 @@
 import { Migrator } from "@mikro-orm/migrations";
 import { defineConfig } from "@mikro-orm/postgresql";
 import { Migration20261104120000InitialSchema } from "./migrations/Migration20261104120000InitialSchema";
+import { Migration20261105090000TransactionsOutboxInbox } from "./migrations/Migration20261105090000TransactionsOutboxInbox";
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -20,7 +21,7 @@ export default defineConfig({
   discovery: { warnWhenNoEntities: false },
   extensions: [Migrator],
   migrations: {
-    migrationsList: [Migration20261104120000InitialSchema],
+    migrationsList: [Migration20261104120000InitialSchema, Migration20261105090000TransactionsOutboxInbox],
     transactional: true,
     allOrNothing: true,
     snapshot: false,
