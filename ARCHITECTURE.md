@@ -42,6 +42,20 @@ O `Money` verifica o tipo dos valores em tempo de execução (`typeof`), mesmo c
 
 Nas comparações, `equals` entre moedas diferentes retorna `false`, pois a pergunta "25 BRL é igual a 25 USD?" tem resposta: não. Já `isLessThan` lança `CurrencyMismatchError`, pois "10 BRL é menor que 25 USD?" não tem resposta sem uma taxa de câmbio, e retornar `true` ou `false` seria inventar um resultado. O zero negativo (`-0`), que a decimal.js representa, é sempre exibido como `"0.00"` e nunca é considerado negativo: um `"-0.00"` em um extrato não tem significado financeiro. Por isso, as consultas usam `greaterThan(0)` e `lessThan(0)`, em vez dos métodos `isPositive` e `isNegative` da biblioteca, que tratam o zero de forma diferente.
 
+### D6 — Desenho da `Wallet`
+
+A `Wallet` recebe os IDs e a data como parâmetros, em vez de gerá-los internamente. Assim, o domínio não depende de gerador de UUID nem do relógio, e pode ser testado com valores fixos. O lançamento é criado antes de alterar o saldo: se a validação falhar, a carteira continua como estava. A verificação de saldo do `debit` não protege contra duas instâncias debitando ao mesmo tempo, pois cada uma tem sua cópia em memória; essa proteção fica a cargo do banco, por meio do controle de versão da carteira e da constraint de saldo não negativo.
+
+### D7 — Códigos de falha
+
+Todo erro de domínio tem um `code` estável, como `INSUFFICIENT_FUNDS` ou `CURRENCY_MISMATCH`. A mensagem pode mudar, mas o código faz parte do contrato, e com ele o provedor decide se corrige o payload, desiste da operação ou reenvia mais tarde.
+
+### D8 — Schema e constraints no banco
+
+As migrations são escritas à mão porque o gerador do MikroORM não cria várias das proteções necessárias, e assim cada regra fica visível no código. O banco garante saldo não negativo, uma carteira por jogador e moeda, a conta do extrato, a moeda do lançamento igual à da carteira e aritmética exata com `numeric`. O extrato é imutável: um trigger cancela qualquer `UPDATE` ou `DELETE`, e outro bloqueia o `TRUNCATE`, que apaga a tabela inteira sem passar linha por linha.
+
+O pacote oficial MikroORM + NestJS não foi usado porque declara dependência do NestJS 11, e o projeto usa o 12. Em vez de arriscar uma incompatibilidade, a integração foi feita manualmente, com pouco código.
+
 ## 3. O que não foi implementado (e como seria feito)
 
 <!-- Preencher no final. -->
