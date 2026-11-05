@@ -15,3 +15,11 @@ export class WalletAlreadyExistsError extends DomainError {
     super("a wallet already exists for this player and currency");
   }
 }
+
+export class ConcurrentWalletUpdateError extends DomainError {
+  override readonly code = "CONCURRENT_WALLET_UPDATE";
+
+  constructor() {
+    super("wallet was modified concurrently, retry the operation");
+  }
+}

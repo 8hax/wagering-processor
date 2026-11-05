@@ -3,6 +3,7 @@ import { payloadHash } from "../../shared/application/payload-hash";
 import { Money } from "../../shared/domain/money";
 import { Wallet } from "../domain/wallet";
 import { WalletLedgerEntry } from "../domain/wallet-ledger-entry";
+import { ConcurrentWalletUpdateError } from "../application/wallet.errors";
 
 interface WalletRow {
   id: string;
@@ -107,4 +108,28 @@ export async function insertLedgerEntry(
       entry.createdAt,
     ],
   );
+}
+
+export async function updateWalletBalance(
+  em: EntityManager,
+  wallet: Wallet,
+  previousVersion: number,
+): Promise<void> {
+  const result = (await em.execute(
+    `update wallets
+       set balance = ?, version = ?, updated_at = ?
+     where id = ? and version = ?`,
+    [
+      wallet.balance.toString(),
+      wallet.version,
+      wallet.updatedAt,
+      wallet.id,
+      previousVersion,
+    ],
+    "run",
+  )) as { affectedRows: number };
+
+  if (result.affectedRows !== 1) {
+    throw new ConcurrentWalletUpdateError();
+  }
 }
