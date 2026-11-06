@@ -1,14 +1,17 @@
-import { Controller, Get, Param } from "@nestjs/common";
+import { Controller, Get, Param, UseGuards } from "@nestjs/common";
 import { z } from "zod";
 import { parseInput } from "../../shared/http/parse-input";
 import { GetWagerTransactionUseCase } from "../application/get-wager-transaction.use-case";
 import { toWagerTransactionView } from "./wager-transaction.view";
+import { ProviderAuthGuard } from "../../shared/http/provider-auth.guard";
+
 
 const ProviderReferenceSchema = z.object({
   providerId: z.string().min(1).max(100),
   externalTransactionId: z.string().min(1).max(200),
 });
 
+@UseGuards(ProviderAuthGuard)
 @Controller("providers/:providerId/wagering/transactions")
 export class ProviderTransactionsController {
   constructor(private readonly getWagerTransaction: GetWagerTransactionUseCase) {}

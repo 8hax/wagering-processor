@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Query } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, Param, Post, Query, UseGuards } from "@nestjs/common";
 import { z } from "zod";
 import { parseInput } from "../../shared/http/parse-input";
 import { CreateWalletUseCase } from "../application/create-wallet.use-case";
@@ -7,6 +7,7 @@ import { ListWalletLedgerUseCase } from "../application/list-wallet-ledger.use-c
 import { ReconcileWalletUseCase } from "../application/reconcile-wallet.use-case";
 import { Wallet } from "../domain/wallet";
 import { WalletLedgerEntry } from "../domain/wallet-ledger-entry";
+import { ProviderAuthGuard } from "../../shared/http/provider-auth.guard";
 
 const MoneyBodySchema = z.object({
   amount: z.string(),
@@ -26,6 +27,7 @@ const LedgerQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 
+@UseGuards(ProviderAuthGuard)
 @Controller("wallets")
 export class WalletController {
   constructor(

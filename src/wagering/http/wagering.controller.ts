@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Post, Res } from "@nestjs/common";
+import { Body, Controller, Get, Headers, Param, Post, Res, UseGuards } from "@nestjs/common";
 import { z } from "zod";
 import { parseInput } from "../../shared/http/parse-input";
 import { newId } from "../../shared/infra/ids";
@@ -9,6 +9,8 @@ import {
 } from "../application/process-wager-transaction.use-case";
 import { WagerTransactionStatus } from "../domain/wager-transaction";
 import { toWagerTransactionView } from "./wager-transaction.view";
+import { ProviderAuthGuard } from "../../shared/http/provider-auth.guard";
+
 
 const HeadersSchema = z.object({
   idempotencyKey: z.string().min(1).max(255),
@@ -33,6 +35,7 @@ interface StatusSettable {
   status(code: number): unknown;
 }
 
+@UseGuards(ProviderAuthGuard)
 @Controller("wagering/transactions")
 export class WageringController {
   constructor(
