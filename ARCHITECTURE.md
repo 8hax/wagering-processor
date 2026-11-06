@@ -50,6 +50,8 @@ A `Wallet` recebe os IDs e a data como parâmetros, em vez de gerá-los internam
 
 Todo erro de domínio tem um `code` estável, como `INSUFFICIENT_FUNDS` ou `CURRENCY_MISMATCH`. A mensagem pode mudar, mas o código faz parte do contrato, e com ele o provedor decide se corrige o payload, desiste da operação ou reenvia mais tarde.
 
+As reversões (`REFUND` e `ROLLBACK`) têm códigos próprios (D16), como `REFERENCE_ALREADY_REVERSED` e `AMOUNT_MISMATCH`, para que a operação saiba *por que* uma reversão foi recusada: uma duplicata e um valor divergente pedem ações diferentes.
+
 ### D8 — Schema e constraints no banco
 
 As migrations são escritas à mão porque o gerador do MikroORM não cria várias das proteções necessárias, e assim cada regra fica visível no código. O banco garante saldo não negativo, uma carteira por jogador e moeda, a conta do extrato, a moeda do lançamento igual à da carteira e aritmética exata com `numeric`. O extrato é imutável: um trigger cancela qualquer `UPDATE` ou `DELETE`, e outro bloqueia o `TRUNCATE`, que apaga a tabela inteira sem passar linha por linha.
@@ -81,23 +83,23 @@ Se o hash for igual, a requisição recebe o resultado original — o mesmo `tra
 
 Transações recusadas por regra de negócio, como `INSUFFICIENT_FUNDS`, também são gravadas. Assim, o reenvio de uma operação recusada devolve a recusa original, mesmo que o saldo tenha mudado depois. O teste com 50 requisições idênticas em paralelo comprova o comportamento: um único processamento, 49 replays e um único débito.
 
-### D12 — Operações implementadas: BET, WIN e LOSS
+### D12 — Operações de rodada: BET, WIN e LOSS
 
-Estas são as operações que movem o sistema. A `BET` debita da carteira do jogador e, caso falte saldo, é recusada com `INSUFFICIENT_FUNDS`, mas a transação é gravada como `REJECTED` para posterior auditoria. A `WIN` credita. A `LOSS` é `PROCESSED` sem alterar saldo, versão ou extrato, pois o valor apostado já foi debitado pela `BET`.
+Estas são as operações básicas de uma rodada. A `BET` debita da carteira do jogador e, caso falte saldo, é recusada com `INSUFFICIENT_FUNDS`, mas a transação é gravada como `REJECTED` para posterior auditoria. A `WIN` credita. A `LOSS` é `PROCESSED` sem alterar saldo, versão ou extrato, pois o valor apostado já foi debitado pela `BET`.
 
-Todas reutilizam o mesmo fluxo, com lock, idempotência, outbox e uma única transação SQL. A diferença fica apenas na função `applyToWallet`, que decide o efeito de cada tipo na carteira.
+Todas reutilizam o mesmo fluxo, com lock, idempotência, outbox e uma única transação SQL. A diferença fica apenas na função `resolveAgainstWallet`, que decide o efeito de cada tipo na carteira (e, nas reversões, valida a transação referenciada).
 
 Toda transação processada gera o evento `WagerTransactionProcessed`. O `WalletBalanceChanged` é gerado somente quando o saldo de fato muda, por isso a `LOSS` não o gera. Uma transação recusada gera o `WagerTransactionRejected`.
 
-O status `PENDING` só existe em memória: a transação é gravada uma única vez, já no estado final, então ninguém de fora vê uma transação pela metade.
+O status `PENDING` só existe em memória: a transação é gravada já com o seu resultado, então ninguém de fora vê uma transação pela metade. A única exceção é `PENDING_REFERENCE` (D16), um estado persistido e visível de propósito, que só pode avançar para `PROCESSED` ou `REJECTED`.
 
-`REFUND` e `ROLLBACK` são recusados com `501` (ver seção 3). A `WIN` aceita a referência opcional à aposta, mas ainda não a valida.
+`REFUND` e `ROLLBACK` estão descritos na D16. A `WIN` aceita a referência opcional à aposta, mas ainda não a valida (ver seção 4).
 
 ### D13 — Observabilidade
 
 Os logs em JSON aproveitam o `ConsoleLogger` do próprio Nest, que já oferece essa saída como opção. Cada registro traz `correlationId`, `transactionId`, `walletId`, `providerId` e o resultado da operação, o suficiente para rastrear qualquer transação. Valores em dinheiro e o saldo do jogador não são registrados, por exigência de privacidade e segurança: os logs costumam circular por mais sistemas e pessoas do que o banco.
 
-As métricas são expostas em `GET /metrics`, no formato do Prometheus, que coleta os valores periodicamente e permite criar gráficos e alertas. Elas cobrem transações por tipo e status, replays, conflitos de idempotência, conflitos de concorrência, divergências de reconciliação, latência de processamento e o outbox lag (quantidade de eventos pendentes e idade do mais antigo, calculados no momento da coleta). Como o publicador da outbox ainda não existe, o lag cresce continuamente, que é exatamente o sinal que essa métrica deve dar quando o publicador para. Métricas de retries e de DLQ dependem do consumidor SQS e não foram implementadas.
+As métricas são expostas em `GET /metrics`, no formato do Prometheus, que coleta os valores periodicamente e permite criar gráficos e alertas. Elas cobrem transações por tipo e status, replays, conflitos de idempotência, conflitos de concorrência, divergências de reconciliação, latência de processamento o outbox lag (quantidade de eventos pendentes e idade do mais antigo, calculados no momento da coleta), eventos publicados e retries de publicação, além de mensagens consumidas, retries e envios para a DLQ no consumidor SQS. Se o publicador parar, o outbox lag cresce continuamente, que é exatamente o sinal que essa métrica deve dar para disparar um alerta.
 
 Quando ocorre um erro inesperado, o cliente recebe apenas `INTERNAL_ERROR`, e os detalhes vão para o log. Assim, nenhuma informação interna, como stack traces ou a estrutura do banco, é exposta a quem chama a API.
 
@@ -111,30 +113,42 @@ A escolha de um guard, e não de um middleware, se deve ao momento em que cada u
 
 ### D15 — Mensageria: outbox, consumidor e inbox
 
-<!-- - Emulador: MiniStack em vez do LocalStack, porque o LocalStack passou a exigir conta/token em 2026;
-       o README aceita os dois.
-     - Publicador da outbox: worker em todas as instâncias. Reivindica eventos com FOR UPDATE SKIP LOCKED
-       (cada publicador pula as linhas travadas por outro: dividem o trabalho sem esperar nem duplicar),
-       publica e marca, tudo numa transação. Se o processo morre, a transação é desfeita e outra
-       instância publica. Falha do broker: nova tentativa com backoff exponencial (1s, 2s, 4s... teto
-       de 5 min), sem descartar o evento.
-     - Entrega at-least-once: se o processo morrer depois de enviar e antes do commit, o evento sai de novo.
-       O MessageDeduplicationId = eventId faz o SQS FIFO descartar a cópia na janela de deduplicação;
-       fora dela, o consumidor deduplica pelo eventId.
-     - Consumidor: reutiliza o mesmo use case do HTTP. A inbox (consumer_name, message_id) é gravada na
-       mesma transação SQL do efeito financeiro; ack (DeleteMessage) só depois do commit.
-     - Classificação de erros (a tabela): sucesso e recusa → ack; reentrega → ack sem efeito (inbox);
-       erro de negócio → ack; transitório → sem ack, visibilidade com backoff; esgotou maxReceiveCount →
-       o SQS move para a DLQ pela redrive policy; malformada → DLQ direto.
-     - CONCURRENT_WALLET_UPDATE é DomainError, mas é tratado como transitório (não pode ser descartado).
-     - SIGTERM: para de buscar, termina a mensagem em andamento e devolve a visibilidade das restantes. -->
-Aqui foi utilizado o emulador MiniStack em vez de LocalStack unicamente porque o LocalStack passou a exigir conta/token em 2026.
+Foi escolhido o MiniStack como emulador do SQS em vez do LocalStack, pois o LocalStack passou a exigir conta e token em 2026. O README do desafio aceita ambos.
+
+O sistema usa duas filas FIFO com papéis distintos: `wager-transactions.fifo`, por onde **entram** transações enviadas pelos provedores, e `wagering-events.fifo`, por onde **saem** os eventos de integração gerados pelo processamento.
+
+**Saída: Transactional Outbox.** A operação financeira e a intenção de publicar o evento são gravadas na mesma transação PostgreSQL. Um worker em segundo plano consulta os eventos pendentes e utiliza `SELECT ... FOR UPDATE SKIP LOCKED` para reivindicá-los, permitindo que várias instâncias dividam o trabalho sem aguardar pelas linhas já bloqueadas por outra. Após publicar no SQS, o evento é marcado como publicado. Se o processo cair antes de confirmar essa marcação, a transação é desfeita, o lock é liberado e outra instância poderá reivindicar o evento. Falhas do broker reagendam a tentativa com backoff exponencial, sem descartar o evento.
+
+A publicação trabalha com garantia `at-least-once`: se o evento chegar ao SQS, mas o publicador cair antes de marcá-lo como publicado, ele será publicado novamente. O `eventId` é utilizado como `MessageDeduplicationId`, e o SQS FIFO descarta duplicatas dentro da sua janela de deduplicação. Como essa janela é limitada, os consumidores desses eventos (sistemas externos a este serviço) devem tratar o `eventId` como chave de idempotência, sem depender exclusivamente do broker.
+
+**Entrada: consumidor com inbox.** O consumidor da fila de transações reutiliza o mesmo caso de uso do HTTP, evitando duplicar as regras financeiras. A inbox registra a combinação `consumer_name` + `message_id`, em que o `message_id` vem do corpo da mensagem, e não do `MessageId` gerado pelo SQS, que muda a cada reenvio. O registro na inbox e o efeito financeiro acontecem na mesma transação SQL, garantindo que ambos sejam confirmados ou revertidos juntos. O `DeleteMessage` (ACK) só é executado depois do commit no PostgreSQL, evitando confirmar uma mensagem antes de garantir a persistência do processamento.
+
+As falhas são classificadas conforme sua natureza: sucessos e recusas de negócio são confirmados com ACK; mensagens já processadas são confirmadas sem repetir o efeito financeiro; erros transitórios não recebem ACK e voltam para a fila após o Visibility Timeout, ajustado com backoff; após atingir o `maxReceiveCount`, o SQS encaminha a mensagem para a DLQ pela redrive policy. Mensagens malformadas são encaminhadas diretamente para a DLQ. O erro `CONCURRENT_WALLET_UPDATE`, embora seja um `DomainError`, é tratado como transitório, pois representa um conflito de concorrência que pode ser resolvido em uma nova tentativa.
+
+O encerramento do consumidor também considera o recebimento de `SIGTERM`: o worker para de buscar novas mensagens, permite que a mensagem em andamento termine e devolve imediatamente a visibilidade das mensagens restantes do lote, para que outra instância as processe sem esperar o timeout.
+
+Essa abordagem evita a perda de eventos entre a confirmação da operação financeira e sua publicação, além de permitir recuperação diante de falhas no processamento. O custo é aceitar possíveis entregas duplicadas, exigindo idempotência dos consumidores, além da complexidade adicional de manter workers, retries, inbox e DLQ. A escolha prioriza a consistência financeira e a capacidade de recuperação em vez de tentar garantir entrega única em todas as etapas.
+
+### D16 — Reversões: REFUND, ROLLBACK e PENDING_REFERENCE
+
+<!-- Escrever com os ingredientes:
+     1. Problema: a reversão pode chegar antes da original, ou duas vezes.
+     2. Decisão: a reversão é uma transação nova que aponta para a original (reference_transaction_id);
+        o saldo é corrigido por um lançamento novo no extrato, nunca alterando o antigo.
+        REFUND só reverte BET (credita); ROLLBACK reverte BET, WIN ou REFUND (movimento inverso).
+     3. No máximo uma reversão por transação: checagem dentro do lock da carteira + índice único parcial
+        no banco como última defesa (teste: 5 REFUNDs em paralelo, 1 aplicado, 4 REFERENCE_ALREADY_REVERSED).
+     4. Fora de ordem: 202 PENDING_REFERENCE, sem mexer no saldo; worker com FOR UPDATE SKIP LOCKED tenta
+        de novo com backoff (2s dobrando até 5 min); após 10 tentativas, REJECTED com REFERENCE_NOT_FOUND.
+        Sem prazo, uma pendência ficaria esperando para sempre.
+     5. Códigos: AMOUNT_MISMATCH, INVALID_REFERENCE_KIND, REFERENCE_MISMATCH, REFERENCE_NOT_PROCESSED,
+        REFERENCE_ALREADY_REVERSED, REVERSAL_INSUFFICIENT_FUNDS, REFERENCE_NOT_FOUND (todos 422).
+     6. Trade-off: ROLLBACK de uma WIN já gasta é recusado (REVERSAL_INSUFFICIENT_FUNDS) em vez de deixar
+        saldo negativo; a cobrança fica para a operação. -->
 
 ## 3. O que não foi implementado (e como seria feito)
 
 <!-- Preencher no final. -->
-
-## 4. Limitações conhecidas
 
 ## 4. Limitações conhecidas
 
@@ -148,6 +162,9 @@ Aqui foi utilizado o emulador MiniStack em vez de LocalStack unicamente porque o
        (messageId diferente, mesma operação) é confirmada sem registro na inbox — a idempotência continua
        garantindo o efeito único.
      - A WIN não valida a BET referenciada.
+     - O prazo de PENDING_REFERENCE é contado em número de tentativas (10, backoff até 5 min), e não em
+       tempo de negócio definido pelo provedor.
+     - ROLLBACK de uma WIN já gasta é recusado; a cobrança do jogador fica para um processo manual.
      - A reversibilidade das migrations foi verificada manualmente (down/up), não por teste automatizado.
      - Não há teste de carga (diferencial opcional).
      - O comportamento do SQS foi validado no MiniStack, e não na AWS real. -->
