@@ -21,6 +21,7 @@ interface WagerTransactionRow {
   amount: string;
   currency: string;
   reference_external_transaction_id: string | null;
+  reference_transaction_id: string | null;
   status: string;
   failure_code: string | null;
   observed_balance: string | null;
@@ -31,7 +32,7 @@ interface WagerTransactionRow {
 const COLUMNS = `
   id, provider_id, external_transaction_id, idempotency_key, payload_hash,
   wallet_id, player_id, round_id, game_id, kind, amount::text as amount, currency,
-  reference_external_transaction_id, status, failure_code,
+  reference_external_transaction_id, reference_transaction_id, status, failure_code,
   observed_balance::text as observed_balance, created_at, processed_at`;
 
 function toWagerTransaction(row: WagerTransactionRow): WagerTransaction {
@@ -50,6 +51,7 @@ function toWagerTransaction(row: WagerTransactionRow): WagerTransaction {
     referenceExternalTransactionId: row.reference_external_transaction_id ?? undefined,
     createdAt: new Date(row.created_at),
     status: row.status as WagerTransactionStatus,
+    referenceTransactionId: row.reference_transaction_id ?? undefined,
     failureCode: (row.failure_code as FailureCode | null) ?? undefined,
     observedBalance:
       row.observed_balance === null
@@ -67,9 +69,9 @@ export async function insertWagerTransaction(
     `insert into wager_transactions
        (id, provider_id, external_transaction_id, idempotency_key, payload_hash,
         wallet_id, player_id, round_id, game_id, kind, amount, currency,
-        reference_external_transaction_id, status, failure_code,
+        reference_external_transaction_id, reference_transaction_id, status, failure_code,
         observed_balance, created_at, processed_at)
-     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       transaction.id,
       transaction.providerId,
@@ -84,6 +86,7 @@ export async function insertWagerTransaction(
       transaction.money.toString(),
       transaction.money.currency,
       transaction.referenceExternalTransactionId ?? null,
+      transaction.referenceTransactionId ?? null,
       transaction.status,
       transaction.failureCode ?? null,
       transaction.observedBalance?.toString() ?? null,
@@ -129,4 +132,77 @@ export async function findWagerTransactionByProviderReference(
   )) as WagerTransactionRow[];
   const row = rows[0];
   return row ? toWagerTransaction(row) : undefined;
+}
+/** Já existe uma reversão PROCESSED deste tipo para a referência? (A unicidade também é garantida por índice.) */
+export async function hasProcessedReversal(
+  em: EntityManager,
+  referenceTransactionId: string,
+  kind: WagerTransactionKind,
+): Promise<boolean> {
+  const rows = (await em.execute(
+    `select 1 from wager_transactions
+      where reference_transaction_id = ? and kind = ? and status = 'PROCESSED'
+      limit 1`,
+    [referenceTransactionId, kind],
+  )) as unknown[];
+  return rows.length > 0;
+}
+
+/** Grava o desfecho de uma transação que estava em PENDING_REFERENCE. */
+export async function updateResolvedWagerTransaction(
+  em: EntityManager,
+  transaction: WagerTransaction,
+): Promise<void> {
+  await em.execute(
+    `update wager_transactions
+        set status = ?, failure_code = ?, reference_transaction_id = ?,
+            observed_balance = ?, processed_at = ?
+      where id = ? and status = 'PENDING_REFERENCE'`,
+    [
+      transaction.status,
+      transaction.failureCode ?? null,
+      transaction.referenceTransactionId ?? null,
+      transaction.observedBalance?.toString() ?? null,
+      transaction.processedAt ?? null,
+      transaction.id,
+    ],
+  );
+}
+
+export interface PendingReferenceClaim {
+  transaction: WagerTransaction;
+  attempts: number;
+}
+
+/** Reivindica uma transação pendente e vencida; SKIP LOCKED permite vários workers em paralelo. */
+export async function claimDuePendingReference(
+  em: EntityManager,
+  now: Date,
+): Promise<PendingReferenceClaim | undefined> {
+  const rows = (await em.execute(
+    `select ${COLUMNS}, reference_attempts
+       from wager_transactions
+      where status = 'PENDING_REFERENCE'
+        and (next_reference_attempt_at is null or next_reference_attempt_at <= ?)
+      order by created_at, id
+      limit 1
+      for update skip locked`,
+    [now],
+  )) as (WagerTransactionRow & { reference_attempts: number })[];
+  const row = rows[0];
+  return row ? { transaction: toWagerTransaction(row), attempts: row.reference_attempts } : undefined;
+}
+
+export async function scheduleReferenceRetry(
+  em: EntityManager,
+  transactionId: string,
+  attempts: number,
+  nextAttemptAt: Date,
+): Promise<void> {
+  await em.execute(
+    `update wager_transactions
+        set reference_attempts = ?, next_reference_attempt_at = ?
+      where id = ? and status = 'PENDING_REFERENCE'`,
+    [attempts, nextAttemptAt, transactionId],
+  );
 }

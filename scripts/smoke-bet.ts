@@ -56,13 +56,23 @@ await call("5a) uma WIN de 10.00 (esperado: 201, PROCESSED, saldo 30.00)",
 await call("5b) uma LOSS (esperado: 201, PROCESSED, saldo continua 30.00)",
   "POST", "/wagering/transactions", bet(`loss-1-${run}`, "0.00", "LOSS"), key(`loss-1-${run}`));
 
-await call("5c) um REFUND (esperado: 501, UNSUPPORTED_TRANSACTION_KIND)",
+await call("5c) REFUND da aposta 1 (esperado: 201, PROCESSED, saldo 110.00)",
   "POST", "/wagering/transactions",
   { ...bet(`refund-1-${run}`, "80.00", "REFUND"), referenceExternalTransactionId: `bet-1-${run}` },
   key(`refund-1-${run}`));
 
+await call("5d) outro REFUND da mesma aposta (esperado: 422, REFERENCE_ALREADY_REVERSED)",
+  "POST", "/wagering/transactions",
+  { ...bet(`refund-2-${run}`, "80.00", "REFUND"), referenceExternalTransactionId: `bet-1-${run}` },
+  key(`refund-2-${run}`));
+
+await call("5e) REFUND de uma aposta que ainda não chegou (esperado: 202, PENDING_REFERENCE)",
+  "POST", "/wagering/transactions",
+  { ...bet(`refund-3-${run}`, "10.00", "REFUND"), referenceExternalTransactionId: `bet-futura-${run}` },
+  key(`refund-3-${run}`));
+
 await call("6) sem Idempotency-Key (esperado: 400, INVALID_PAYLOAD)",
   "POST", "/wagering/transactions", bet(`bet-3-${run}`, "10.00"));
 
-await call("7) consultar a carteira (esperado: 200, saldo 30.00, versão 3)",
+await call("7) consultar a carteira (esperado: 200, saldo 110.00, versão 4)",
   "GET", `/wallets/${wallet.id}`);

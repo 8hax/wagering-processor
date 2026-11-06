@@ -74,5 +74,8 @@ function statusFor(result: ProcessWagerResult): number {
   if (result.status === WagerTransactionStatus.Rejected) {
     return 422;
   }
+  if (result.status === WagerTransactionStatus.PendingReference) {
+    return 202;
+  }
   return result.idempotentReplay ? 200 : 201;
 }

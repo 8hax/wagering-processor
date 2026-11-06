@@ -11,6 +11,8 @@ export function toWagerTransactionView(transaction: WagerTransaction) {
     gameId: transaction.gameId || null,
     kind: transaction.kind,
     money: transaction.money.toJSON(),
+    referenceExternalTransactionId: transaction.referenceExternalTransactionId ?? null,
+    referenceTransactionId: transaction.referenceTransactionId ?? null,
     status: transaction.status,
     failureCode: transaction.failureCode ?? null,
     balance: transaction.observedBalance?.toJSON() ?? null,

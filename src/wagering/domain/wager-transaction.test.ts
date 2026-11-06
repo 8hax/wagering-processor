@@ -7,6 +7,7 @@ import {
   WagerTransactionKind,
   WagerTransactionStatus,
 } from "./wager-transaction";
+import { LedgerDirection } from "../../wallet/domain/wallet-ledger-entry";
 
 const brl = (amount: string) => Money.from({ amount, currency: "BRL" });
 const NOW = new Date("2026-11-05T12:00:00.000Z");
@@ -94,5 +95,63 @@ describe("WagerTransaction: transições", () => {
 
     expect(transaction.matchesPayload("a".repeat(64))).toBe(true);
     expect(transaction.matchesPayload("b".repeat(64))).toBe(false);
+  });
+});
+describe("WagerTransaction: reversões (REFUND e ROLLBACK)", () => {
+  const processed = (overrides: Parameters<typeof props>[0] = {}) => {
+    const transaction = WagerTransaction.create(props(overrides));
+    transaction.markProcessed(brl("75.00"), NOW);
+    return transaction;
+  };
+  const reversal = (kind: WagerTransactionKind, overrides: Parameters<typeof props>[0] = {}) =>
+    WagerTransaction.create(
+      props({ id: "tx-2", externalTransactionId: "ext-2", kind, referenceExternalTransactionId: "ext-1", ...overrides }),
+    );
+
+  test("REFUND válido de uma BET processada não tem problema e credita", () => {
+    const bet = processed();
+    const refund = reversal(WagerTransactionKind.Refund);
+
+    expect(refund.referenceProblem(bet)).toBeUndefined();
+    expect(refund.ledgerDirectionFor(bet)).toBe(LedgerDirection.Credit);
+  });
+
+  test("ROLLBACK inverte a direção da transação original", () => {
+    expect(reversal(WagerTransactionKind.Rollback).ledgerDirectionFor(processed())).toBe(LedgerDirection.Credit);
+
+    const win = processed({ kind: WagerTransactionKind.Win });
+    expect(reversal(WagerTransactionKind.Rollback).ledgerDirectionFor(win)).toBe(LedgerDirection.Debit);
+  });
+
+  test.each([
+    ["valor diferente", { money: brl("10.00") }, "AMOUNT_MISMATCH"],
+    ["outra carteira", { walletId: "wallet-2" }, "REFERENCE_MISMATCH"],
+    ["outra rodada", { roundId: "round-2" }, "REFERENCE_MISMATCH"],
+  ] as const)("recusa %s", (_label, overrides, code) => {
+    expect(reversal(WagerTransactionKind.Refund, overrides).referenceProblem(processed())).toBe(code);
+  });
+
+  test("REFUND não pode referenciar uma WIN", () => {
+    const win = processed({ kind: WagerTransactionKind.Win });
+    expect(reversal(WagerTransactionKind.Refund).referenceProblem(win)).toBe("INVALID_REFERENCE_KIND");
+  });
+
+  test("referência que não foi processada é recusada", () => {
+    const rejected = WagerTransaction.create(props());
+    rejected.reject("INSUFFICIENT_FUNDS", brl("10.00"), NOW);
+    expect(reversal(WagerTransactionKind.Refund).referenceProblem(rejected)).toBe("REFERENCE_NOT_PROCESSED");
+  });
+
+  test("PENDING_REFERENCE só nasce de PENDING e ainda pode ser resolvida", () => {
+    const refund = reversal(WagerTransactionKind.Refund);
+    refund.markPendingReference(brl("75.00"));
+
+    expect(refund.status).toBe(WagerTransactionStatus.PendingReference);
+    expect(refund.isTerminal()).toBe(false);
+    expect(() => refund.markPendingReference(brl("75.00"))).toThrow(InvalidTransactionStateError);
+
+    refund.markProcessed(brl("100.00"), NOW, "tx-1");
+    expect(refund.status).toBe(WagerTransactionStatus.Processed);
+    expect(refund.referenceTransactionId).toBe("tx-1");
   });
 });

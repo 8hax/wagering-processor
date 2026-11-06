@@ -49,3 +49,11 @@ export class WalletBalanceChanged extends IntegrationEvent<WalletBalanceChangedD
     super(props);
   }
 }
+export class WagerTransactionPendingReference extends IntegrationEvent<WagerTransactionResultData> {
+  override readonly eventType = "WagerTransactionPendingReference";
+  override readonly version = 1;
+
+  constructor(props: IntegrationEventProps<WagerTransactionResultData>) {
+    super(props);
+  }
+}

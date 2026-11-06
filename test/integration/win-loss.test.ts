@@ -113,7 +113,7 @@ describe("LOSS", () => {
   });
 });
 
-describe("Rodada completa e operações não suportadas", () => {
+describe("Rodada completa e operação interna", () => {
   test("BET seguida de WIN mantém o extrato consistente", async () => {
     const wallet = await openWallet("100.00");
 
@@ -125,15 +125,11 @@ describe("Rodada completa e operações não suportadas", () => {
     expect(after.version).toBe(3);
   });
 
-  test("REFUND ainda não é suportado", async () => {
+  test("OPENING é interna e não pode ser submetida", async () => {
     const wallet = await openWallet("100.00");
 
     await expect(
-      processWager.execute({
-        ...betInput(wallet, `refund-${newId()}`, "10.00"),
-        kind: "REFUND",
-        referenceExternalTransactionId: "bet-x",
-      }),
+      processWager.execute({ ...betInput(wallet, `opening-${newId()}`, "10.00"), kind: "OPENING" }),
     ).rejects.toThrow(UnsupportedTransactionKindError);
   });
 });

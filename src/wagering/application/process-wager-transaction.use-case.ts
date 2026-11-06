@@ -20,7 +20,7 @@ import {
   WalletNotFoundError,
 } from "../../wallet/application/wallet.errors";
 import { InsufficientFundsError, Wallet } from "../../wallet/domain/wallet";
-import { WalletLedgerEntry } from "../../wallet/domain/wallet-ledger-entry";
+import { LedgerDirection, WalletLedgerEntry } from "../../wallet/domain/wallet-ledger-entry";
 import {
   findWalletById,
   insertLedgerEntry,
@@ -33,8 +33,13 @@ import {
   WagerTransactionStatus,
 } from "../domain/wager-transaction";
 import {
+  claimDuePendingReference,
   findWagerTransactionByIdempotencyKey,
+  findWagerTransactionByProviderReference,
+  hasProcessedReversal,
   insertWagerTransaction,
+  scheduleReferenceRetry,
+  updateResolvedWagerTransaction,
 } from "../infra/wager-transaction.sql";
 import {
   DuplicateInboxMessageError,
@@ -43,6 +48,7 @@ import {
   WalletMismatchError,
 } from "./wagering.errors";
 import {
+  WagerTransactionPendingReference,
   WagerTransactionProcessed,
   WagerTransactionRejected,
   WalletBalanceChanged,
@@ -52,7 +58,26 @@ const SUPPORTED_KINDS: ReadonlySet<string> = new Set([
   WagerTransactionKind.Bet,
   WagerTransactionKind.Win,
   WagerTransactionKind.Loss,
+  WagerTransactionKind.Refund,
+  WagerTransactionKind.Rollback,
 ]);
+
+export interface PendingReferencePolicy {
+  /** Tentativas antes de recusar com REFERENCE_NOT_FOUND. */
+  maxAttempts: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+}
+
+export function pendingReferencePolicyFromEnv(): PendingReferencePolicy {
+  return {
+    maxAttempts: Number(process.env.PENDING_REFERENCE_MAX_ATTEMPTS ?? 10),
+    baseDelayMs: Number(process.env.PENDING_REFERENCE_BASE_DELAY_MS ?? 2_000),
+    maxDelayMs: Number(process.env.PENDING_REFERENCE_MAX_DELAY_MS ?? 300_000),
+  };
+}
+
+export type PendingReferenceOutcome = "resolved" | "waiting" | "expired";
 
 export interface ProcessWagerInput {
   idempotencyKey: string;
@@ -204,8 +229,26 @@ export class ProcessWagerTransactionUseCase {
       createdAt: now,
     });
 
+    let reference: WagerTransaction | undefined;
+    if (transaction.requiresReference()) {
+      reference = await findWagerTransactionByProviderReference(
+        em,
+        transaction.providerId,
+        transaction.referenceExternalTransactionId ?? "",
+      );
+      if (!reference) {
+        transaction.markPendingReference(wallet.balance);
+        await insertWagerTransaction(em, transaction);
+        await insertOutboxEvents(
+          em,
+          buildEvents(transaction, wallet, undefined, input.correlationId, now),
+        );
+        return toResult(transaction, false);
+      }
+    }
+
     const previousVersion = wallet.version;
-    const entry = applyToWallet(wallet, transaction, now);
+    const entry = await resolveAgainstWallet(em, wallet, transaction, reference, now);
 
     await insertWagerTransaction(em, transaction);
     if (entry) {
@@ -215,6 +258,58 @@ export class ProcessWagerTransactionUseCase {
     await insertOutboxEvents(em, buildEvents(transaction, wallet, entry, input.correlationId, now));
 
     return toResult(transaction, false);
+  }
+
+  /**
+   * Reprocessa uma transação em PENDING_REFERENCE (usado pelo worker agendado).
+   * Devolve undefined quando não há nenhuma pendente e vencida.
+   */
+  async retryPendingReference(
+    policy: PendingReferencePolicy = pendingReferencePolicyFromEnv(),
+    now: Date = new Date(),
+  ): Promise<PendingReferenceOutcome | undefined> {
+    return this.orm.em.fork().transactional(async (em) => {
+      const claim = await claimDuePendingReference(em, now);
+      if (!claim) {
+        return undefined;
+      }
+      const { transaction } = claim;
+      const wallet = await findWalletById(em, transaction.walletId, { forUpdate: true });
+      if (!wallet) {
+        throw new WalletNotFoundError();
+      }
+
+      const reference = await findWagerTransactionByProviderReference(
+        em,
+        transaction.providerId,
+        transaction.referenceExternalTransactionId ?? "",
+      );
+
+      if (!reference) {
+        const attempts = claim.attempts + 1;
+        if (attempts < policy.maxAttempts) {
+          const delay = Math.min(policy.baseDelayMs * 2 ** (attempts - 1), policy.maxDelayMs);
+          await scheduleReferenceRetry(em, transaction.id, attempts, new Date(now.getTime() + delay));
+          return "waiting";
+        }
+        transaction.reject("REFERENCE_NOT_FOUND", wallet.balance, now);
+        await updateResolvedWagerTransaction(em, transaction);
+        await insertOutboxEvents(em, buildEvents(transaction, wallet, undefined, transaction.id, now));
+        wagerTransactionsTotal.inc({ kind: transaction.kind, status: transaction.status });
+        return "expired";
+      }
+
+      const previousVersion = wallet.version;
+      const entry = await resolveAgainstWallet(em, wallet, transaction, reference, now);
+      await updateResolvedWagerTransaction(em, transaction);
+      if (entry) {
+        await insertLedgerEntry(em, entry);
+        await updateWalletBalance(em, wallet, previousVersion);
+      }
+      await insertOutboxEvents(em, buildEvents(transaction, wallet, entry, transaction.id, now));
+      wagerTransactionsTotal.inc({ kind: transaction.kind, status: transaction.status });
+      return "resolved";
+    });
   }
 
   private async replay(idempotencyKey: string, hash: string): Promise<ProcessWagerResult> {
@@ -227,14 +322,36 @@ export class ProcessWagerTransactionUseCase {
 }
 
 /**
- * Aplica a transação na carteira de acordo com o tipo e define o status final.
+ * Aplica a transação na carteira e define o status final.
+ * Para REFUND e ROLLBACK, valida a referência antes (inclusive se ela já foi revertida).
  * Devolve o lançamento do extrato, ou undefined quando o saldo não muda.
+ * Executado com a carteira travada, então a checagem de "já revertida" não tem corrida.
  */
-function applyToWallet(
+async function resolveAgainstWallet(
+  em: EntityManager,
   wallet: Wallet,
   transaction: WagerTransaction,
+  reference: WagerTransaction | undefined,
   now: Date,
-): WalletLedgerEntry | undefined {
+): Promise<WalletLedgerEntry | undefined> {
+  if (reference) {
+    const problem =
+      transaction.referenceProblem(reference) ??
+      ((await hasProcessedReversal(em, reference.id, transaction.kind))
+        ? "REFERENCE_ALREADY_REVERSED"
+        : undefined);
+    if (problem) {
+      transaction.reject(problem, wallet.balance, now, reference.id);
+      return undefined;
+    }
+  }
+
+  const direction = transaction.ledgerDirectionFor(reference);
+  if (direction === undefined) {
+    transaction.markProcessed(wallet.balance, now, reference?.id);
+    return undefined;
+  }
+
   const movement = {
     money: transaction.money,
     transactionId: transaction.id,
@@ -242,31 +359,23 @@ function applyToWallet(
     at: now,
   };
 
-  switch (transaction.kind) {
-    case WagerTransactionKind.Bet: {
-      try {
-        const entry = wallet.debit(movement);
-        transaction.markProcessed(wallet.balance, now);
-        return entry;
-      } catch (error) {
-        if (!(error instanceof InsufficientFundsError)) {
-          throw error;
-        }
-        transaction.reject("INSUFFICIENT_FUNDS", wallet.balance, now);
-        return undefined;
-      }
+  if (direction === LedgerDirection.Credit) {
+    const entry = wallet.credit(movement);
+    transaction.markProcessed(wallet.balance, now, reference?.id);
+    return entry;
+  }
+
+  try {
+    const entry = wallet.debit(movement);
+    transaction.markProcessed(wallet.balance, now, reference?.id);
+    return entry;
+  } catch (error) {
+    if (!(error instanceof InsufficientFundsError)) {
+      throw error;
     }
-    case WagerTransactionKind.Win: {
-      const entry = wallet.credit(movement);
-      transaction.markProcessed(wallet.balance, now);
-      return entry;
-    }
-    case WagerTransactionKind.Loss: {
-      transaction.markProcessed(wallet.balance, now);
-      return undefined;
-    }
-    default:
-      throw new UnsupportedTransactionKindError(transaction.kind);
+    const code = reference ? "REVERSAL_INSUFFICIENT_FUNDS" : "INSUFFICIENT_FUNDS";
+    transaction.reject(code, wallet.balance, now, reference?.id);
+    return undefined;
   }
 }
 
@@ -317,6 +426,17 @@ function buildEvents(
     failureCode: transaction.failureCode,
   };
   const base = { correlationId, causationId: transaction.id, occurredAt: now };
+
+  if (transaction.status === WagerTransactionStatus.PendingReference) {
+    return [
+      new WagerTransactionPendingReference({
+        ...base,
+        eventId: newId(),
+        aggregateId: transaction.id,
+        data: resultData,
+      }),
+    ];
+  }
 
   if (transaction.status === WagerTransactionStatus.Rejected) {
     return [

@@ -109,10 +109,45 @@ O desenho previsto é validar um token OIDC emitido por um Identity Provider ext
 
 A escolha de um guard, e não de um middleware, se deve ao momento em que cada um atua: o guard roda depois da escolha da rota e sabe qual endpoint será executado, enquanto o middleware age antes, sem saber qual rota vai atender a requisição.
 
+### D15 — Mensageria: outbox, consumidor e inbox
+
+<!-- - Emulador: MiniStack em vez do LocalStack, porque o LocalStack passou a exigir conta/token em 2026;
+       o README aceita os dois.
+     - Publicador da outbox: worker em todas as instâncias. Reivindica eventos com FOR UPDATE SKIP LOCKED
+       (cada publicador pula as linhas travadas por outro: dividem o trabalho sem esperar nem duplicar),
+       publica e marca, tudo numa transação. Se o processo morre, a transação é desfeita e outra
+       instância publica. Falha do broker: nova tentativa com backoff exponencial (1s, 2s, 4s... teto
+       de 5 min), sem descartar o evento.
+     - Entrega at-least-once: se o processo morrer depois de enviar e antes do commit, o evento sai de novo.
+       O MessageDeduplicationId = eventId faz o SQS FIFO descartar a cópia na janela de deduplicação;
+       fora dela, o consumidor deduplica pelo eventId.
+     - Consumidor: reutiliza o mesmo use case do HTTP. A inbox (consumer_name, message_id) é gravada na
+       mesma transação SQL do efeito financeiro; ack (DeleteMessage) só depois do commit.
+     - Classificação de erros (a tabela): sucesso e recusa → ack; reentrega → ack sem efeito (inbox);
+       erro de negócio → ack; transitório → sem ack, visibilidade com backoff; esgotou maxReceiveCount →
+       o SQS move para a DLQ pela redrive policy; malformada → DLQ direto.
+     - CONCURRENT_WALLET_UPDATE é DomainError, mas é tratado como transitório (não pode ser descartado).
+     - SIGTERM: para de buscar, termina a mensagem em andamento e devolve a visibilidade das restantes. -->
+Aqui foi utilizado o emulador MiniStack em vez de LocalStack unicamente porque o LocalStack passou a exigir conta/token em 2026.
+
 ## 3. O que não foi implementado (e como seria feito)
 
 <!-- Preencher no final. -->
 
 ## 4. Limitações conhecidas
 
-<!-- Preencher no final. -->
+## 4. Limitações conhecidas
+
+<!-- - A chave de idempotência é única no sistema todo, e não por provedor: dois provedores com a mesma chave
+       colidem (o segundo recebe 409). Não há vazamento, porque o hash inclui o providerId. Correção:
+       unique (provider_id, idempotency_key).
+     - Erros transitórios embrulhados pelo MikroORM: o filtro HTTP reconhece falhas pelo `code`; um deadlock
+       pode chegar dentro de uma classe do ORM e virar 500 em vez de 503. Com o lock por carteira, deadlocks
+       são improváveis.
+     - A inbox registra só mensagens que chegaram a processar; uma duplicata detectada pela idempotency key
+       (messageId diferente, mesma operação) é confirmada sem registro na inbox — a idempotência continua
+       garantindo o efeito único.
+     - A WIN não valida a BET referenciada.
+     - A reversibilidade das migrations foi verificada manualmente (down/up), não por teste automatizado.
+     - Não há teste de carga (diferencial opcional).
+     - O comportamento do SQS foi validado no MiniStack, e não na AWS real. -->
