@@ -161,9 +161,16 @@ Para subir réplicas reais, o caminho seria:
 
 Descrita na D14: o `ProviderAuthGuard` já está aplicado aos controllers como ponto de extensão. A implementação validaria um token OIDC emitido por um Identity Provider (por exemplo, Keycloak), verificando a assinatura pelas chaves públicas (JWKS), e exigiria que o `providerId` do token fosse igual ao do payload, para que um provedor autenticado não possa enviar transações em nome de outro. No consumidor SQS, a mesma garantia viria do controle de acesso à fila (IAM), e não de um token por mensagem.
 
-### Teste de carga
+### Teste de carga sustentado
 
-A concorrência foi validada por testes de integração, mas não sob carga sustentada. Um cenário com k6 cobriria três situações: muitas carteiras em paralelo (vazão), uma carteira muito disputada (o pior caso do lock pessimista) e reenvios em massa da mesma transação (idempotência). As métricas observadas seriam a latência p95/p99 em `wagering_processing_duration_seconds`, a taxa de respostas `503`, os conflitos de concorrência e o outbox lag, para identificar o limite de vazão por carteira e por instância.
+Existe um teste de carga curto (`scripts/load-test.ts`), sem dependências externas, que exercita três cenários pela API com 50 requisições simultâneas e confere a correção de cada um ao final: muitas carteiras em paralelo, uma carteira muito disputada e a mesma aposta reenviada muitas vezes. Em uma execução de referência, em ambiente de desenvolvimento e com uma única instância, os resultados foram:
+
+- 50 carteiras com 20 apostas cada (1.000 requisições): cerca de 300 req/s, p95 de ~230 ms, todas processadas;
+- uma carteira com saldo para 100 apostas recebendo 300 ao mesmo tempo: exatamente 100 aceitas e 200 recusadas por saldo, saldo final `0.00` e nenhum conflito de concorrência (`503`);
+- a mesma aposta enviada 200 vezes ao mesmo tempo: um processamento e 199 replays;
+- logo após a carga, o outbox lag chegou a cerca de 300 eventos e foi drenado em poucos segundos.
+
+Os números são indicativos e dependem da máquina. O que falta é um teste sustentado, por vários minutos e com várias instâncias, com uma ferramenta como o k6, observando a latência em `wagering_processing_duration_seconds`, a taxa de `503`, os conflitos de concorrência e o outbox lag, para encontrar o limite de vazão por carteira e por instância.
 
 ### Reprocessamento da DLQ
 
@@ -191,7 +198,7 @@ A reconciliação existe (`POST /wallets/:walletId/reconciliation`), mas só rod
 
 - **ROLLBACK de uma WIN já gasta.** É recusado com `REVERSAL_INSUFFICIENT_FUNDS`, para não quebrar a regra de saldo não negativo; a cobrança do jogador fica para um processo manual da operação (D16).
 
-- **Sem teste de carga.** A concorrência foi validada por testes de integração (incluindo 3 processos separados disputando a mesma carteira), mas não sob carga sustentada. Correção: um cenário com k6 medindo latência e taxa de conflitos.
+- **Carga apenas curta e com uma instância.** O teste de carga (`scripts/load-test.ts`) dura poucos segundos e roda contra uma única instância; o comportamento sob carga sustentada e com várias réplicas não foi medido (seção 3).
 
 - **Ordem dos eventos publicados por agregado.** Os eventos usam o `aggregateId` como `MessageGroupId`, e o SQS FIFO os entrega na ordem em que foram enviados. Porém, se o envio de um evento falhar e o seguinte do mesmo agregado for publicado antes da nova tentativa, ou se dois publicadores enviarem eventos da mesma carteira ao mesmo tempo, a ordem de envio pode se inverter. Os eventos de carteira levam o `walletVersion`, que permite ao consumidor ordená-los e descartar versões antigas. Correção: reivindicar apenas o evento mais antigo pendente de cada agregado, sem prejudicar a vazão das carteiras mais disputadas.
 

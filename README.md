@@ -89,6 +89,14 @@ Com a aplicação rodando, o script abaixo executa o fluxo completo pela API (cr
 bun scripts/smoke-bet.ts
 ```
 
+### Teste de carga
+
+Com a aplicação rodando, o script abaixo dispara requisições concorrentes pela API em três cenários (muitas carteiras em paralelo, uma carteira muito disputada e a mesma aposta reenviada 200 vezes), imprime vazão, latência (p50, p95, p99) e status, e confere ao final a correção de cada cenário pela reconciliação. Termina com erro se alguma verificação falhar.
+
+```bash
+bun scripts/load-test.ts                 # CONCURRENCY=100 bun scripts/load-test.ts para mais pressão
+```
+
 ## API
 
 | Método | Rota | Descrição |
@@ -148,7 +156,7 @@ src/
 ├── health/       liveness e readiness
 └── infra/        conexão com o banco e migrations
 test/integration/ testes contra o PostgreSQL real
-scripts/          verificação manual pela API
+scripts/          verificação manual e teste de carga pela API
 ```
 
 O domínio (`domain/`) não depende do NestJS nem do banco.
