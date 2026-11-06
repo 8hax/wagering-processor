@@ -1,12 +1,22 @@
 import { EntityManager, MikroORM } from "@mikro-orm/postgresql";
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import { isUniqueViolation } from "../../infra/database/postgres-errors";
 import { IntegrationEvent } from "../../shared/application/integration-event";
 import { payloadHash } from "../../shared/application/payload-hash";
 import { Money, MoneyProps } from "../../shared/domain/money";
 import { newId } from "../../shared/infra/ids";
 import { insertOutboxEvents } from "../../shared/infra/outbox.sql";
-import { WalletNotFoundError } from "../../wallet/application/wallet.errors";
+import {
+  idempotencyConflictsTotal,
+  idempotentReplaysTotal,
+  wagerProcessingDuration,
+  wagerTransactionsTotal,
+  walletConcurrencyConflictsTotal,
+} from "../../shared/observability/metrics";
+import {
+  ConcurrentWalletUpdateError,
+  WalletNotFoundError,
+} from "../../wallet/application/wallet.errors";
 import { InsufficientFundsError, Wallet } from "../../wallet/domain/wallet";
 import { WalletLedgerEntry } from "../../wallet/domain/wallet-ledger-entry";
 import {
@@ -59,9 +69,56 @@ export interface ProcessWagerResult {
 
 @Injectable()
 export class ProcessWagerTransactionUseCase {
+  private readonly logger = new Logger(ProcessWagerTransactionUseCase.name);
+
   constructor(private readonly orm: MikroORM) {}
 
   async execute(input: ProcessWagerInput): Promise<ProcessWagerResult> {
+    const stopTimer = wagerProcessingDuration.startTimer();
+    const context = {
+      correlationId: input.correlationId,
+      providerId: input.providerId,
+      externalTransactionId: input.externalTransactionId,
+      walletId: input.walletId,
+      kind: input.kind,
+    };
+
+    try {
+      const result = await this.executeOnce(input);
+
+      if (result.idempotentReplay) {
+        idempotentReplaysTotal.inc();
+      } else {
+        wagerTransactionsTotal.inc({ kind: input.kind, status: result.status });
+      }
+      stopTimer({ outcome: result.idempotentReplay ? "replay" : result.status });
+
+      this.logger.log("wager transaction handled", {
+        ...context,
+        transactionId: result.transactionId,
+        status: result.status,
+        failureCode: result.failureCode,
+        idempotentReplay: result.idempotentReplay,
+      });
+      return result;
+    } catch (error) {
+      if (error instanceof IdempotencyConflictError) {
+        idempotencyConflictsTotal.inc();
+      }
+      if (error instanceof ConcurrentWalletUpdateError) {
+        walletConcurrencyConflictsTotal.inc();
+      }
+      stopTimer({ outcome: "error" });
+
+      this.logger.warn("wager transaction failed", {
+        ...context,
+        errorCode: error instanceof Error && "code" in error ? String(error.code) : "UNKNOWN",
+      });
+      throw error;
+    }
+  }
+
+  private async executeOnce(input: ProcessWagerInput): Promise<ProcessWagerResult> {
     if (input.kind !== "BET") {
       throw new UnsupportedTransactionKindError(input.kind);
     }

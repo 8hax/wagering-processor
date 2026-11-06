@@ -3,6 +3,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { MoneyProps } from "../../shared/domain/money";
 import { readReconciliationSnapshot } from "../infra/wallet.sql";
 import { WalletNotFoundError } from "./wallet.errors";
+import { reconciliationDivergencesTotal } from "../../shared/observability/metrics";
 
 export interface ReconciliationResult {
   walletId: string;
@@ -29,14 +30,12 @@ export class ReconcileWalletUseCase {
     const consistent = difference.isZero();
 
     if (!consistent) {
-      this.logger.warn(
-        JSON.stringify({
-          event: "wallet_reconciliation_divergence",
-          walletId,
-          difference: difference.toString(),
-          checkedEntries: snapshot.checkedEntries,
-        }),
-      );
+      reconciliationDivergencesTotal.inc();
+      this.logger.warn("wallet reconciliation divergence", {
+        walletId,
+        difference: difference.toString(),
+        checkedEntries: snapshot.checkedEntries,
+      });
     }
 
     return {
