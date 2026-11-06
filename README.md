@@ -151,3 +151,13 @@ scripts/          verificação manual pela API
 ```
 
 O domínio (`domain/`) não depende do NestJS nem do banco.
+
+## Uso de IA
+
+Este projeto foi desenvolvido com o apoio do Claude (Anthropic), usado de três formas:
+
+- **Estudo:** explicações dos conceitos envolvidos (lock pessimista, idempotência, Transactional Outbox, inbox, SQS FIFO, reversões) e simulados de perguntas técnicas.
+- **Implementação:** boa parte do código foi gerada pela IA e entregue em incrementos. Cada incremento foi revisado, aplicado e executado por mim, sempre com a suíte de testes passando antes do commit.
+- **Revisão:** auditorias do código contra os requisitos do desafio, que encontraram problemas reais, como a possibilidade de reverter a mesma aposta por um `REFUND` e por um `ROLLBACK`, corrigida com teste e migration (D16).
+
+As decisões registradas no `ARCHITECTURE.md` foram escritas por mim e revisadas com a IA. Usar IA não muda a minha responsabilidade sobre o projeto: as escolhas e as limitações documentadas são minhas, e posso explicar e defender cada uma.
