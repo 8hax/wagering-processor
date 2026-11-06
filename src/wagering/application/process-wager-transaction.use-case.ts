@@ -337,7 +337,7 @@ async function resolveAgainstWallet(
   if (reference) {
     const problem =
       transaction.referenceProblem(reference) ??
-      ((await hasProcessedReversal(em, reference.id, transaction.kind))
+      ((await hasProcessedReversal(em, reference.id))
         ? "REFERENCE_ALREADY_REVERSED"
         : undefined);
     if (problem) {

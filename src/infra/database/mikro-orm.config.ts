@@ -3,6 +3,7 @@ import { defineConfig } from "@mikro-orm/postgresql";
 import { Migration20261104120000InitialSchema } from "./migrations/Migration20261104120000InitialSchema";
 import { Migration20261105090000TransactionsOutboxInbox } from "./migrations/Migration20261105090000TransactionsOutboxInbox";
 import { Migration20261106120000PendingReferenceRetries } from "./migrations/Migration20261106120000PendingReferenceRetries";
+import { Migration20261106150000OneReversalPerTransaction } from "./migrations/Migration20261106150000OneReversalPerTransaction";
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -26,6 +27,7 @@ export default defineConfig({
       Migration20261104120000InitialSchema,
       Migration20261105090000TransactionsOutboxInbox,
       Migration20261106120000PendingReferenceRetries,
+      Migration20261106150000OneReversalPerTransaction,
     ],
     transactional: true,
     allOrNothing: true,

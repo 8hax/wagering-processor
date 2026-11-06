@@ -134,16 +134,17 @@ export async function findWagerTransactionByProviderReference(
   return row ? toWagerTransaction(row) : undefined;
 }
 /** Já existe uma reversão PROCESSED deste tipo para a referência? (A unicidade também é garantida por índice.) */
+/** Uma transação só pode ser revertida uma vez, por REFUND ou por ROLLBACK (não pelos dois). */
 export async function hasProcessedReversal(
   em: EntityManager,
   referenceTransactionId: string,
-  kind: WagerTransactionKind,
 ): Promise<boolean> {
   const rows = (await em.execute(
     `select 1 from wager_transactions
-      where reference_transaction_id = ? and kind = ? and status = 'PROCESSED'
+      where reference_transaction_id = ? and status = 'PROCESSED'
+        and kind in ('REFUND', 'ROLLBACK')
       limit 1`,
-    [referenceTransactionId, kind],
+    [referenceTransactionId],
   )) as unknown[];
   return rows.length > 0;
 }

@@ -139,6 +139,62 @@ describe("REFUND", () => {
   });
 });
 
+describe("Uma reversão por transação, qualquer que seja o tipo", () => {
+  test("REFUND e depois ROLLBACK da mesma BET: o segundo é recusado (sem crédito em dobro)", async () => {
+    const wallet = await openWallet();
+    const bet = operation(wallet, "BET", "30.00");
+    await processWager.execute(bet);
+    await processWager.execute(operation(wallet, "REFUND", "30.00", bet.externalTransactionId));
+
+    const rollback = await processWager.execute(
+      operation(wallet, "ROLLBACK", "30.00", bet.externalTransactionId),
+    );
+
+    expect(rollback.status).toBe(WagerTransactionStatus.Rejected);
+    expect(rollback.failureCode).toBe("REFERENCE_ALREADY_REVERSED");
+    await expectConsistent(wallet.id, "100.00");
+  });
+
+  test("REFUND e ROLLBACK da mesma BET em paralelo: só um é aplicado", async () => {
+    const wallet = await openWallet();
+    const bet = operation(wallet, "BET", "30.00");
+    await processWager.execute(bet);
+
+    const results = await Promise.all(
+      ["REFUND", "ROLLBACK", "REFUND", "ROLLBACK"].map((kind) =>
+        processWager.execute(operation(wallet, kind, "30.00", bet.externalTransactionId)),
+      ),
+    );
+
+    expect(results.filter((result) => result.status === WagerTransactionStatus.Processed)).toHaveLength(1);
+    await expectConsistent(wallet.id, "100.00");
+  });
+
+  test("o banco recusa uma segunda reversão processada, mesmo de outro tipo", async () => {
+    const wallet = await openWallet();
+    const bet = operation(wallet, "BET", "30.00");
+    await processWager.execute(bet);
+    const refund = await processWager.execute(
+      operation(wallet, "REFUND", "30.00", bet.externalTransactionId),
+    );
+    const em = orm.em.fork();
+
+    const forged = em.execute(
+      `insert into wager_transactions
+         (id, provider_id, external_transaction_id, idempotency_key, payload_hash, wallet_id, player_id,
+          round_id, game_id, kind, amount, currency, reference_external_transaction_id,
+          reference_transaction_id, status, observed_balance, processed_at, created_at)
+       select ?, provider_id, ?, ?, payload_hash, wallet_id, player_id, round_id, game_id,
+              'ROLLBACK', amount, currency, reference_external_transaction_id,
+              reference_transaction_id, status, observed_balance, processed_at, created_at
+         from wager_transactions where id = ?`,
+      [newId(), `forged-${newId()}`, `forged-${newId()}`, refund.transactionId],
+    );
+
+    await expect(forged).rejects.toThrow(/wager_tx_one_reversal_per_reference/);
+  });
+});
+
 describe("ROLLBACK", () => {
   test("inverte uma WIN e um REFUND", async () => {
     const wallet = await openWallet();

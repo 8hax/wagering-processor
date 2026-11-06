@@ -67,7 +67,7 @@ Os testes de integração aplicam as migrations automaticamente e criam carteira
 
 - o cenário obrigatório: duas apostas de `80.00` sobre saldo de `100.00`;
 - `WIN` creditando o saldo e `LOSS` registrada sem alterar saldo, versão ou extrato;
-- `REFUND` e `ROLLBACK`: reversão aplicada uma única vez (inclusive com 5 reversões em paralelo), valor, tipo ou rodada divergentes recusados, e reversão que deixaria saldo negativo recusada;
+- `REFUND` e `ROLLBACK`: cada transação é revertida uma única vez, qualquer que seja o tipo da reversão (inclusive com reversões em paralelo), valor, tipo ou rodada divergentes recusados, e reversão que deixaria saldo negativo recusada;
 - `REFUND` antes da `BET`: fica `PENDING_REFERENCE` e é aplicado quando a aposta chega, ou recusado com `REFERENCE_NOT_FOUND` quando as tentativas se esgotam;
 - a mesma aposta enviada 50 vezes em paralelo, resultando em um único débito;
 - 20 apostas disputando a mesma carteira;
@@ -123,7 +123,7 @@ Valores monetários são sempre strings com duas casas decimais (`"25.00"`).
 | Situação | Status | Código (`code`) | O provedor deve |
 |---|---|---|---|
 | Transação nova processada | `201` | — | — |
-| Replay de transação já processada | `200` | `idempotentReplay: true` | — |
+| Replay de transação já processada | `200` | `idempotentReplay: true` (uma recusa repetida volta como `422`, e uma pendência como `202`) | — |
 | Reversão aguardando a transação referenciada | `202` | `status: PENDING_REFERENCE` | consultar depois |
 | Payload inválido | `400` | `INVALID_PAYLOAD`, `INVALID_MONEY`, `INVALID_CURSOR` | corrigir o payload |
 | Recurso inexistente | `404` | `WALLET_NOT_FOUND`, `TRANSACTION_NOT_FOUND` | verificar o identificador |
