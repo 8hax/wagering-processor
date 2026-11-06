@@ -68,12 +68,11 @@ O bloqueio é realizado em nível de linha, evitando um lock global e permitindo
 
 O controle de versão (`UPDATE ... WHERE version = ?`) funciona como uma camada adicional de detecção de conflitos, enquanto a constraint `balance >= 0` no banco representa a última barreira de integridade dos dados.
 
-A estratégia foi validada experimentalmente: com o `FOR UPDATE` removido, o controle de versão impediu o débito duplicado e o saldo negativo, mas recusas limpas (`422 INSUFFICIENT_FUNDS`) passaram a virar erros de concorrência (`503`). No mesmo experimento, as 50 cópias da mesma aposta continuaram gerando um único débito, mostrando que duplicação e concorrência são protegidas por mecanismos independentes: a idempotência pela unicidade no banco, e a concorrência pelo lock. 
+A estratégia foi validada experimentalmente: com o `FOR UPDATE` removido, o controle de versão impediu o débito duplicado e o saldo negativo, mas recusas limpas (`422 INSUFFICIENT_FUNDS`) passaram a virar erros de concorrência (`503`). No mesmo experimento, as 50 cópias da mesma aposta continuaram gerando um único débito, mostrando que duplicação e concorrência são protegidas por mecanismos independentes: a idempotência pela unicidade no banco, e a concorrência pelo lock.
 
 ### D10 — SQL explícito em vez de entidades do ORM
 
 Foi utilizado SQL explícito (`em.execute`) tendo em vista o lock e o controle de versão, que são o centro da correção, para que fiquem visíveis e sob controle, e para controlar a conversão do dinheiro sem nunca passar por `number`: o banco devolve os valores como texto (`balance::text`), que entram direto no `Money.from`. Todos os valores são enviados como parâmetros, nunca concatenados ao SQL, o que protege contra SQL injection. O MikroORM continua cuidando do pool de conexões com o banco, das transações e das migrations. O custo é escrever à mão o mapeamento entre as linhas do banco e o domínio, com a vantagem de explicitar toda a operação, facilitando a revisão e a auditoria.
-
 
 ### D11 — Idempotência persistente
 
@@ -81,7 +80,7 @@ A idempotência evita que uma mesma operação, reenviada pelo provedor ou entre
 
 Para distinguir uma repetição de um uso indevido da mesma chave, cada transação guarda um `payloadHash`: o SHA-256 de um JSON canônico, com as chaves ordenadas recursivamente e os campos ausentes omitidos, calculado apenas sobre os campos de negócio. O header e o `correlationId` ficam de fora, pois são metadados de transporte e mudam a cada reenvio.
 
-Se o hash for igual, a requisição recebe o resultado original — o mesmo `transactionId`, status, `failureCode` e o saldo observado no momento do processamento, guardado em `observed_balance` —, com `idempotentReplay: true` e status `200`. Se o hash for diferente, é um conflito: a resposta é `409 IDEMPOTENCY_CONFLICT` e nada é processado.
+Se o hash for igual, a requisição recebe o resultado original — o mesmo `transactionId`, status, `failureCode` e o saldo observado no momento do processamento, guardado em `observed_balance` —, com `idempotentReplay: true` e o mesmo tipo de resposta da original: `200` para uma transação processada, `422` para uma recusada e `202` para uma pendente. Se o hash for diferente, é um conflito: a resposta é `409 IDEMPOTENCY_CONFLICT` e nada é processado.
 
 Transações recusadas por regra de negócio, como `INSUFFICIENT_FUNDS`, também são gravadas. Assim, o reenvio de uma operação recusada devolve a recusa original, mesmo que o saldo tenha mudado depois. O teste com 50 requisições idênticas em paralelo comprova o comportamento: um único processamento, 49 replays e um único débito.
 
@@ -101,7 +100,7 @@ O status `PENDING` só existe em memória: a transação é gravada já com o se
 
 Os logs em JSON aproveitam o `ConsoleLogger` do próprio Nest, que já oferece essa saída como opção. Cada registro traz `correlationId`, `transactionId`, `walletId`, `providerId` e o resultado da operação, o suficiente para rastrear qualquer transação. Valores em dinheiro e o saldo do jogador não são registrados, por exigência de privacidade e segurança: os logs costumam circular por mais sistemas e pessoas do que o banco.
 
-As métricas são expostas em `GET /metrics`, no formato do Prometheus, que coleta os valores periodicamente e permite criar gráficos e alertas. Elas cobrem transações por tipo e status, replays, conflitos de idempotência, conflitos de concorrência, divergências de reconciliação, latência de processamento o outbox lag (quantidade de eventos pendentes e idade do mais antigo, calculados no momento da coleta), eventos publicados e retries de publicação, além de mensagens consumidas, retries e envios para a DLQ no consumidor SQS. Se o publicador parar, o outbox lag cresce continuamente, que é exatamente o sinal que essa métrica deve dar para disparar um alerta.
+As métricas são expostas em `GET /metrics`, no formato do Prometheus, que coleta os valores periodicamente e permite criar gráficos e alertas. Elas cobrem transações por tipo e status, replays, conflitos de idempotência, conflitos de concorrência, divergências de reconciliação, latência de processamento, o outbox lag (quantidade de eventos pendentes e idade do mais antigo, calculados no momento da coleta), eventos publicados e retries de publicação, além de mensagens consumidas, retries e envios para a DLQ no consumidor SQS. Se o publicador parar, o outbox lag cresce continuamente, que é exatamente o sinal que essa métrica deve dar para disparar um alerta.
 
 Quando ocorre um erro inesperado, o cliente recebe apenas `INTERNAL_ERROR`, e os detalhes vão para o log. Assim, nenhuma informação interna, como stack traces ou a estrutura do banco, é exposta a quem chama a API.
 
@@ -182,7 +181,7 @@ A reconciliação existe (`POST /wallets/:walletId/reconciliation`), mas só rod
 
 - **WIN sem validação da BET.** A `WIN` aceita a referência à aposta, mas não verifica se ela existe ou pertence à mesma rodada. Correção: reaproveitar a validação de referência já usada pelas reversões (D16).
 
-- **Prazo de `PENDING_REFERENCE` contado em tentativas.** O limite é de 10 tentativas com backoff (até 5 minutos entre elas), e não um prazo de negócio definido pelo provedor. Se a original chegar depois da última tentativa, a reversão já terá sido recusada com `REFERENCE_NOT_FOUND`, e o provedor precisará reenviá-la.
+- **Prazo de `PENDING_REFERENCE` contado em tentativas.** O limite é de 10 tentativas com backoff (até 5 minutos entre elas), e não um prazo de negócio definido pelo provedor. Se a original chegar depois da última tentativa, a reversão já terá sido recusada com `REFERENCE_NOT_FOUND`, e o provedor precisará enviá-la como uma nova transação, com nova chave, porque o reenvio com a mesma chave devolve a recusa original (D11).
 
 - **Pendência que falha sempre (poison pill).** Se o reprocessamento de uma pendência lançar um erro inesperado, a transação é desfeita sem registrar a tentativa; por ser a mais antiga, ela é tentada de novo e atrasa as demais. Nenhum caminho conhecido provoca esse erro, porque valores e referências são validados antes. Correção: registrar a tentativa em uma transação separada, antes do processamento.
 
