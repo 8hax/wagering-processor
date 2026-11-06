@@ -93,14 +93,21 @@ export class SqsWagerConsumer {
   /** Recebe um lote e trata cada mensagem; para no meio se shouldStop() ficar verdadeiro. */
   async pollOnce(shouldStop: () => boolean = () => false): Promise<ConsumeOutcome[]> {
     const { queueUrl } = await this.resolveQueues();
-    const received = await this.client.send(
-      new ReceiveMessageCommand({
-        QueueUrl: queueUrl,
-        MaxNumberOfMessages: 10,
-        WaitTimeSeconds: this.options.waitTimeSeconds,
-        MessageSystemAttributeNames: ["ApproximateReceiveCount"],
-      }),
-    );
+    let received;
+    try {
+      received = await this.client.send(
+        new ReceiveMessageCommand({
+          QueueUrl: queueUrl,
+          MaxNumberOfMessages: 10,
+          WaitTimeSeconds: this.options.waitTimeSeconds,
+          MessageSystemAttributeNames: ["ApproximateReceiveCount"],
+        }),
+      );
+    } catch (error) {
+      // A fila pode ter deixado de existir (ex.: o emulador reiniciou): a próxima volta a recria.
+      this.queues = undefined;
+      throw error;
+    }
 
     const outcomes: ConsumeOutcome[] = [];
     for (const message of received.Messages ?? []) {

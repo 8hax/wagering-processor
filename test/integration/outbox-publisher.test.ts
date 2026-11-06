@@ -189,3 +189,19 @@ describe("Publicador da outbox com SQS real", () => {
     expect(await pendingCount()).toBe(0);
   });
 });
+
+describe("Fila que deixa de existir (ex.: emulador reiniciado sem persistência)", () => {
+  test("a readiness detecta a fila fora do ar, e o publicador a recria na tentativa seguinte", async () => {
+    const options = { ...sqsOptionsFromEnv(), queueName: `test-recovery-${newId()}.fifo` };
+    const publisher = new SqsEventPublisher(options);
+    await publisher.ping();
+
+    await sqsClient.send(new DeleteQueueCommand({ QueueUrl: await publisher.queueUrlForTests() }));
+
+    await expect(publisher.ping()).rejects.toThrow();
+    await publisher.ping();
+
+    await sqsClient.send(new DeleteQueueCommand({ QueueUrl: await publisher.queueUrlForTests() }));
+    publisher.onApplicationShutdown();
+  });
+});

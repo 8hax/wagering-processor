@@ -28,7 +28,7 @@ export enum WagerTransactionStatus {
  * - REFERENCE_NOT_PROCESSED: a referência existe, mas não foi aplicada (ex.: foi recusada);
  * - INVALID_REFERENCE_KIND: REFUND só reverte BET; ROLLBACK reverte BET, WIN ou REFUND;
  * - AMOUNT_MISMATCH: reversão parcial não é suportada;
- * - REFERENCE_ALREADY_REVERSED: a referência já foi revertida por esse tipo de operação.
+ * - REFERENCE_ALREADY_REVERSED: a referência já foi revertida (por REFUND ou ROLLBACK; só uma vez).
  */
 export type FailureCode =
   | "INSUFFICIENT_FUNDS"

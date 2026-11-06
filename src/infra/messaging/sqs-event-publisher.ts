@@ -1,4 +1,9 @@
-import { CreateQueueCommand, SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
+import {
+  CreateQueueCommand,
+  GetQueueAttributesCommand,
+  SendMessageCommand,
+  SQSClient,
+} from "@aws-sdk/client-sqs";
 import { Injectable, OnApplicationShutdown } from "@nestjs/common";
 import { EventPublisher } from "../../shared/application/event-publisher";
 import { OutboxMessage } from "../../shared/domain/outbox-message";
@@ -19,7 +24,9 @@ export function sqsOptionsFromEnv(): SqsEventPublisherOptions {
 
 /**
  * Publica os eventos da outbox numa fila SQS FIFO.
- * - MessageGroupId = aggregateId: eventos do mesmo agregado (ex.: a mesma carteira) saem em ordem.
+ * - MessageGroupId = aggregateId: o SQS entrega os eventos do mesmo agregado na ordem em que foram
+ *   enviados. Com falha do broker ou publicadores concorrentes, o envio pode sair fora de ordem
+ *   (limitação documentada); os eventos de carteira levam walletVersion para o consumidor ordenar.
  * - MessageDeduplicationId = eventId: se o mesmo evento for reenviado (ex.: o processo morreu
  *   depois de publicar e antes do commit), o SQS descarta a cópia dentro da janela de deduplicação.
  *   Fora dessa janela, o consumidor deduplica pelo eventId.
@@ -35,21 +42,28 @@ export class SqsEventPublisher extends EventPublisher implements OnApplicationSh
   }
 
   async publish(message: OutboxMessage): Promise<void> {
-    await this.client.send(
-      new SendMessageCommand({
-        QueueUrl: await this.resolveQueueUrl(),
-        MessageBody: JSON.stringify(message.payload),
-        MessageGroupId: message.aggregateId,
-        MessageDeduplicationId: message.id,
-        MessageAttributes: {
-          eventType: { DataType: "String", StringValue: message.eventType },
-        },
-      }),
+    await this.withQueue((queueUrl) =>
+      this.client.send(
+        new SendMessageCommand({
+          QueueUrl: queueUrl,
+          MessageBody: JSON.stringify(message.payload),
+          MessageGroupId: message.aggregateId,
+          MessageDeduplicationId: message.id,
+          MessageAttributes: {
+            eventType: { DataType: "String", StringValue: message.eventType },
+          },
+        }),
+      ),
     );
   }
 
+  /** Consulta a fila de verdade a cada chamada: a readiness precisa detectar o SQS fora do ar. */
   async ping(): Promise<void> {
-    await this.resolveQueueUrl();
+    await this.withQueue((queueUrl) =>
+      this.client.send(
+        new GetQueueAttributesCommand({ QueueUrl: queueUrl, AttributeNames: ["QueueArn"] }),
+      ),
+    );
   }
 
   async queueUrlForTests(): Promise<string> {
@@ -58,6 +72,19 @@ export class SqsEventPublisher extends EventPublisher implements OnApplicationSh
 
   onApplicationShutdown(): void {
     this.client.destroy();
+  }
+
+  /**
+   * Executa a chamada com a URL da fila. Em caso de falha, esquece a URL guardada: se a fila
+   * deixou de existir (ex.: o emulador reiniciou sem persistência), a próxima tentativa a recria.
+   */
+  private async withQueue<T>(call: (queueUrl: string) => Promise<T>): Promise<T> {
+    try {
+      return await call(await this.resolveQueueUrl());
+    } catch (error) {
+      this.queueUrl = undefined;
+      throw error;
+    }
   }
 
   /** CreateQueue é idempotente: devolve a URL da fila, criando-a se ainda não existir. */

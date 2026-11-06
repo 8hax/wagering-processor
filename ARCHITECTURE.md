@@ -193,4 +193,8 @@ A reconciliação existe (`POST /wallets/:walletId/reconciliation`), mas só rod
 
 - **Sem teste de carga.** A concorrência foi validada por testes de integração (incluindo 3 processos separados disputando a mesma carteira), mas não sob carga sustentada. Correção: um cenário com k6 medindo latência e taxa de conflitos.
 
+- **Ordem dos eventos publicados por agregado.** Os eventos usam o `aggregateId` como `MessageGroupId`, e o SQS FIFO os entrega na ordem em que foram enviados. Porém, se o envio de um evento falhar e o seguinte do mesmo agregado for publicado antes da nova tentativa, ou se dois publicadores enviarem eventos da mesma carteira ao mesmo tempo, a ordem de envio pode se inverter. Os eventos de carteira levam o `walletVersion`, que permite ao consumidor ordená-los e descartar versões antigas. Correção: reivindicar apenas o evento mais antigo pendente de cada agregado, sem prejudicar a vazão das carteiras mais disputadas.
+
+- **Ordem no consumo após falha transitória.** O consumidor processa um lote de até 10 mensagens; se uma delas falhar de forma transitória, as seguintes do mesmo grupo ainda são processadas antes da nova tentativa. A correção financeira se mantém, porque a idempotência e o `PENDING_REFERENCE` toleram mensagens fora de ordem. Correção: devolver à fila, sem processar, as mensagens seguintes do mesmo grupo.
+
 - **SQS validado apenas no MiniStack.** Não havia conta AWS no escopo do desafio. Na AWS real, podem variar limites, latência, janela de deduplicação e permissões (IAM), que o emulador não reproduz por completo.

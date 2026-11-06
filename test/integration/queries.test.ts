@@ -59,9 +59,14 @@ describe("Extrato paginado por cursor", () => {
       initialBalance: { amount: "10.00", currency: "BRL" },
     });
 
-    expect(listLedger.execute(wallet.id, "isto-nao-e-um-cursor", 10)).rejects.toThrow(
+    await expect(listLedger.execute(wallet.id, "isto-nao-e-um-cursor", 10)).rejects.toThrow(
       InvalidCursorError,
     );
+
+    const forgedId = Buffer.from(
+      JSON.stringify({ createdAt: new Date().toISOString(), id: "nao-e-uuid" }),
+    ).toString("base64url");
+    await expect(listLedger.execute(wallet.id, forgedId, 10)).rejects.toThrow(InvalidCursorError);
   });
 });
 

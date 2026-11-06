@@ -1,6 +1,6 @@
 import { MikroORM } from "@mikro-orm/postgresql";
 import { Injectable } from "@nestjs/common";
-import { decodeCursor, encodeCursor, InvalidCursorError } from "../../shared/application/cursor";
+import { decodeCursor, encodeCursor } from "../../shared/application/cursor";
 import { WalletLedgerEntry } from "../domain/wallet-ledger-entry";
 import { findLedgerPage, findWalletById } from "../infra/wallet.sql";
 import { WalletNotFoundError } from "./wallet.errors";
@@ -24,15 +24,8 @@ export class ListWalletLedgerUseCase {
 
     const after = cursor === undefined ? undefined : decodeCursor(cursor);
 
-    let entries: WalletLedgerEntry[];
-    try {
-      entries = await findLedgerPage(em, walletId, after, limit + 1);
-    } catch (error) {
-      if (after) {
-        throw new InvalidCursorError();
-      }
-      throw error;
-    }
+    // O cursor já foi validado por completo: uma falha aqui é de infraestrutura, e não do cliente.
+    const entries = await findLedgerPage(em, walletId, after, limit + 1);
 
     const hasMore = entries.length > limit;
     const items = hasMore ? entries.slice(0, limit) : entries;

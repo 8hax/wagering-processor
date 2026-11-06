@@ -8,6 +8,8 @@ export class InvalidCursorError extends DomainError {
   }
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export interface PageCursor {
   createdAt: string;
   id: string;
@@ -27,6 +29,7 @@ export function decodeCursor(raw: string): PageCursor {
       "id" in parsed &&
       typeof parsed.createdAt === "string" &&
       typeof parsed.id === "string" &&
+      UUID.test(parsed.id) &&
       !Number.isNaN(Date.parse(parsed.createdAt))
     ) {
       return { createdAt: parsed.createdAt, id: parsed.id };
