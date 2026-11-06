@@ -74,7 +74,7 @@ Os testes de integração aplicam as migrations automaticamente e criam carteira
 - carteiras distintas processadas em paralelo;
 - **3 processos separados** apostando na mesma carteira;
 - conflito de idempotência, atomicidade com a outbox e constraints do banco;
-- consumo da fila com inbox: reentrega após commit sem efeito duplicado, `messageId` reutilizado com outro conteúdo recusado como conflito, erro de negócio confirmado, mensagem malformada na DLQ e falha transitória com retry até a DLQ;
+- consumo da fila com inbox: reentrega após commit sem efeito duplicado, recusa de negócio gravada e confirmada, erros detectados antes de gravar (inclusive `messageId` reutilizado com outro conteúdo) e mensagens malformadas enviadas à DLQ e falha transitória com retry até a DLQ;
 - publicação da outbox no SQS, **dois publishers concorrentes** sobre a mesma outbox, instância que morre com eventos reivindicados, retry com backoff após falha do broker e fila recriada depois de deixar de existir;
 - extrato paginado (inclusive cursores adulterados), consultas e reconciliação;
 - todas as migrations aplicadas, revertidas e reaplicadas em um schema vazio e isolado.

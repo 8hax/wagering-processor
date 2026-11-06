@@ -145,4 +145,27 @@ describe("BET: concorrência contra o Postgres real", () => {
     },
     30_000,
   );
+  test("o extrato fica em ordem: cada lançamento começa no saldo em que o anterior terminou", async () => {
+    const wallet = await createWallet.execute({
+      playerId: newId(),
+      initialBalance: { amount: "100.00", currency: "BRL" },
+    });
+
+    await Promise.all(
+      Array.from({ length: 40 }, () =>
+        processWager.execute(betInput(wallet, `bet-${newId()}`, "1.00")),
+      ),
+    );
+
+    const entries = (await orm.em.fork().execute(
+      `select balance_before::text as before, balance_after::text as after
+         from wallet_ledger_entries where wallet_id = ? order by created_at, id`,
+      [wallet.id],
+    )) as { before: string; after: string }[];
+
+    expect(entries).toHaveLength(41);
+    for (let i = 1; i < entries.length; i++) {
+      expect(entries[i]?.before).toBe(entries[i - 1]?.after);
+    }
+  });
 });

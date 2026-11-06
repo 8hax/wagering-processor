@@ -24,7 +24,7 @@ import { DuplicateInboxMessageError } from "../application/wagering.errors";
 
 export const CONSUMER_NAME = "wager-transactions-consumer";
 
-export type ConsumeOutcome = "processed" | "duplicate" | "business-error" | "retry" | "dead-lettered";
+export type ConsumeOutcome = "processed" | "duplicate" | "retry" | "dead-lettered";
 
 export interface SqsWagerConsumerOptions {
   queueName: string;
@@ -73,7 +73,10 @@ const WagerMessageSchema = z.object({
  *
  * - ack (DeleteMessage) só depois do commit;
  * - reentrega da mesma mensagem: a inbox (mesma transação SQL) detecta e a mensagem é confirmada sem efeito;
- * - erro de negócio (DomainError): terminal, a mensagem é confirmada;
+ * - transação recusada por regra de negócio (REJECTED): já foi gravada, a mensagem é confirmada;
+ * - erro de domínio lançado antes de gravar (valor inválido, carteira inexistente, conflito de
+ *   idempotência...): nada foi gravado, então a mensagem vai para a DLQ com o código do erro,
+ *   para não sumir sem rastro;
  * - erro transitório: a mensagem não é confirmada e volta após um backoff de visibilidade;
  *   ao exceder maxReceiveCount, o próprio SQS a move para a DLQ (redrive policy);
  * - mensagem malformada: erro permanente, enviada diretamente para a DLQ.
@@ -157,12 +160,9 @@ export class SqsWagerConsumer {
         return this.count("duplicate");
       }
       if (error instanceof DomainError && !(error instanceof ConcurrentWalletUpdateError)) {
-        this.logger.warn("wager message rejected by business rule", {
-          messageId: body.messageId,
-          errorCode: error.code,
-        });
-        await this.ack(queueUrl, message);
-        return this.count("business-error");
+        // Nada foi gravado: sem a DLQ, a mensagem desapareceria sem deixar rastro.
+        await this.deadLetter(queueUrl, message, error.code);
+        return this.count("dead-lettered");
       }
       await this.retryLater(queueUrl, message, body.messageId);
       return this.count("retry");
@@ -216,7 +216,7 @@ export class SqsWagerConsumer {
     );
     await this.ack(queueUrl, message);
     sqsDeadLetteredTotal.inc();
-    this.logger.warn("malformed message sent to the dead letter queue", {
+    this.logger.warn("message sent to the dead letter queue", {
       sqsMessageId: message.MessageId,
       reason,
     });

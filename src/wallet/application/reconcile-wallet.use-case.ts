@@ -33,7 +33,6 @@ export class ReconcileWalletUseCase {
       reconciliationDivergencesTotal.inc();
       this.logger.warn("wallet reconciliation divergence", {
         walletId,
-        difference: difference.toString(),
         checkedEntries: snapshot.checkedEntries,
       });
     }

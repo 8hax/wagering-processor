@@ -211,10 +211,8 @@ export class ProcessWagerTransactionUseCase {
     hash: string,
     options: ProcessWagerOptions,
   ): Promise<ProcessWagerResult> {
-    const now = new Date();
-
     if (options.inbox) {
-      options.inbox.markProcessed(now);
+      options.inbox.markProcessed(new Date());
       await insertInboxMessage(em, options.inbox);
     }
 
@@ -222,6 +220,8 @@ export class ProcessWagerTransactionUseCase {
     if (!wallet) {
       throw new WalletNotFoundError();
     }
+    // Só depois do lock: as operações da carteira recebem datas na mesma ordem em que são aplicadas.
+    const now = nextInstantFor(wallet, new Date());
     if (wallet.playerId !== input.playerId || wallet.currency !== money.currency) {
       throw new WalletMismatchError();
     }
@@ -291,6 +291,7 @@ export class ProcessWagerTransactionUseCase {
       if (!wallet) {
         throw new WalletNotFoundError();
       }
+      const at = nextInstantFor(wallet, now);
 
       const reference = await findWagerTransactionByProviderReference(
         em,
@@ -305,21 +306,21 @@ export class ProcessWagerTransactionUseCase {
           await scheduleReferenceRetry(em, transaction.id, attempts, new Date(now.getTime() + delay));
           return "waiting";
         }
-        transaction.reject("REFERENCE_NOT_FOUND", wallet.balance, now);
+        transaction.reject("REFERENCE_NOT_FOUND", wallet.balance, at);
         await updateResolvedWagerTransaction(em, transaction);
-        await insertOutboxEvents(em, buildEvents(transaction, wallet, undefined, transaction.id, now));
+        await insertOutboxEvents(em, buildEvents(transaction, wallet, undefined, transaction.id, at));
         wagerTransactionsTotal.inc({ kind: transaction.kind, status: transaction.status });
         return "expired";
       }
 
       const previousVersion = wallet.version;
-      const entry = await resolveAgainstWallet(em, wallet, transaction, reference, now);
+      const entry = await resolveAgainstWallet(em, wallet, transaction, reference, at);
       await updateResolvedWagerTransaction(em, transaction);
       if (entry) {
         await insertLedgerEntry(em, entry);
         await updateWalletBalance(em, wallet, previousVersion);
       }
-      await insertOutboxEvents(em, buildEvents(transaction, wallet, entry, transaction.id, now));
+      await insertOutboxEvents(em, buildEvents(transaction, wallet, entry, transaction.id, at));
       wagerTransactionsTotal.inc({ kind: transaction.kind, status: transaction.status });
       return "resolved";
     });
@@ -390,6 +391,15 @@ async function resolveAgainstWallet(
     transaction.reject(code, wallet.balance, now, reference?.id);
     return undefined;
   }
+}
+
+/**
+ * Instante para a próxima operação da carteira, já com o lock obtido: nunca anterior à última
+ * movimentação. Assim o extrato e os eventos de uma carteira ficam em ordem cronológica estrita,
+ * mesmo com relógios ligeiramente diferentes entre instâncias.
+ */
+function nextInstantFor(wallet: Wallet, candidate: Date): Date {
+  return new Date(Math.max(candidate.getTime(), wallet.updatedAt.getTime() + 1));
 }
 
 function businessPayload(input: ProcessWagerInput) {

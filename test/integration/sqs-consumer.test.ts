@@ -180,16 +180,32 @@ describe("Consumidor SQS", () => {
     consumer.destroy();
   });
 
-  test("erro de negócio é terminal: a mensagem é confirmada e não volta", async () => {
+  test("recusa gravada (REJECTED) é terminal: a mensagem é confirmada e não volta", async () => {
     const wallet = await openWallet();
-    const { consumer, queueUrl } = await newConsumer(processWager);
+    const { consumer, queueUrl, deadLetterQueueUrl } = await newConsumer(processWager);
+
+    await send(queueUrl, wagerMessage(wallet, "500.00"));
+
+    expect(await consumer.pollOnce()).toEqual(["processed"]);
+    expect(await messagesIn(queueUrl)).toBe(0);
+    expect(await messagesIn(deadLetterQueueUrl)).toBe(0);
+    consumer.destroy();
+  });
+
+  test.each([
+    ["carteira inexistente", (message: ReturnType<typeof wagerMessage>) => (message.data.walletId = newId())],
+    ["valor fora do formato", (message: ReturnType<typeof wagerMessage>) => (message.data.money.amount = "25")],
+  ])("erro antes de gravar (%s) não some: a mensagem vai para a DLQ", async (_label, corrupt) => {
+    const wallet = await openWallet();
+    const { consumer, queueUrl, deadLetterQueueUrl } = await newConsumer(processWager);
     const message = wagerMessage(wallet);
-    message.data.walletId = newId();
+    corrupt(message);
 
     await send(queueUrl, message);
 
-    expect(await consumer.pollOnce()).toEqual(["business-error"]);
+    expect(await consumer.pollOnce()).toEqual(["dead-lettered"]);
     expect(await messagesIn(queueUrl)).toBe(0);
+    expect(await messagesIn(deadLetterQueueUrl)).toBe(1);
     consumer.destroy();
   });
 
@@ -243,7 +259,7 @@ describe("Inbox: mesmo messageId com conteúdo diferente", () => {
     await send(queueUrl, original);
     expect(await consumer.pollOnce()).toEqual(["processed"]);
     await send(queueUrl, reused);
-    expect(await consumer.pollOnce()).toEqual(["business-error"]);
+    expect(await consumer.pollOnce()).toEqual(["dead-lettered"]);
 
     expect(await debitsOf(wallet.id)).toBe(1);
     expect(await messagesIn(queueUrl)).toBe(0);
