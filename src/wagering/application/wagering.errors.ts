@@ -23,3 +23,11 @@ export class UnsupportedTransactionKindError extends DomainError {
     super(`transaction kind ${kind} is not supported yet`);
   }
 }
+
+export class WagerTransactionNotFoundError extends DomainError {
+  override readonly code = "TRANSACTION_NOT_FOUND";
+
+  constructor() {
+    super("wager transaction not found");
+  }
+}

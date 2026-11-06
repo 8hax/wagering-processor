@@ -104,3 +104,29 @@ export async function findWagerTransactionByIdempotencyKey(
   const row = rows[0];
   return row ? toWagerTransaction(row) : undefined;
 }
+
+export async function findWagerTransactionById(
+  em: EntityManager,
+  id: string,
+): Promise<WagerTransaction | undefined> {
+  const rows = (await em.execute(
+    `select ${COLUMNS} from wager_transactions where id = ?`,
+    [id],
+  )) as WagerTransactionRow[];
+  const row = rows[0];
+  return row ? toWagerTransaction(row) : undefined;
+}
+
+export async function findWagerTransactionByProviderReference(
+  em: EntityManager,
+  providerId: string,
+  externalTransactionId: string,
+): Promise<WagerTransaction | undefined> {
+  const rows = (await em.execute(
+    `select ${COLUMNS} from wager_transactions
+      where provider_id = ? and external_transaction_id = ?`,
+    [providerId, externalTransactionId],
+  )) as WagerTransactionRow[];
+  const row = rows[0];
+  return row ? toWagerTransaction(row) : undefined;
+}

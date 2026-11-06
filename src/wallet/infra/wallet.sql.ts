@@ -2,8 +2,9 @@ import { EntityManager } from "@mikro-orm/postgresql";
 import { payloadHash } from "../../shared/application/payload-hash";
 import { Money } from "../../shared/domain/money";
 import { Wallet } from "../domain/wallet";
-import { WalletLedgerEntry } from "../domain/wallet-ledger-entry";
+import { LedgerDirection, WalletLedgerEntry } from "../domain/wallet-ledger-entry";
 import { ConcurrentWalletUpdateError } from "../application/wallet.errors";
+
 
 interface WalletRow {
   id: string;
@@ -178,4 +179,59 @@ export async function readReconciliationSnapshot(
     calculated: credits.subtract(debits),
     checkedEntries: Number(row.checked),
   };
+}
+
+interface LedgerEntryRow {
+  id: string;
+  wallet_id: string;
+  transaction_id: string;
+  direction: string;
+  amount: string;
+  currency: string;
+  balance_before: string;
+  balance_after: string;
+  created_at: Date | string;
+}
+
+const LEDGER_COLUMNS = `
+  id, wallet_id, transaction_id, direction, amount::text as amount, currency,
+  balance_before::text as balance_before, balance_after::text as balance_after, created_at`;
+
+function toLedgerEntry(row: LedgerEntryRow): WalletLedgerEntry {
+  const money = (amount: string) => Money.from({ amount, currency: row.currency });
+  return WalletLedgerEntry.rehydrate({
+    id: row.id,
+    walletId: row.wallet_id,
+    transactionId: row.transaction_id,
+    direction: row.direction as LedgerDirection,
+    money: money(row.amount),
+    balanceBefore: money(row.balance_before),
+    balanceAfter: money(row.balance_after),
+    createdAt: new Date(row.created_at),
+  });
+}
+
+export async function findLedgerPage(
+  em: EntityManager,
+  walletId: string,
+  after: { createdAt: string; id: string } | undefined,
+  limit: number,
+): Promise<WalletLedgerEntry[]> {
+  const rows = after
+    ? ((await em.execute(
+        `select ${LEDGER_COLUMNS} from wallet_ledger_entries
+          where wallet_id = ? and (created_at, id) > (?::timestamptz, ?::uuid)
+          order by created_at, id
+          limit ?`,
+        [walletId, after.createdAt, after.id, limit],
+      )) as LedgerEntryRow[])
+    : ((await em.execute(
+        `select ${LEDGER_COLUMNS} from wallet_ledger_entries
+          where wallet_id = ?
+          order by created_at, id
+          limit ?`,
+        [walletId, limit],
+      )) as LedgerEntryRow[]);
+
+  return rows.map(toLedgerEntry);
 }

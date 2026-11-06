@@ -1,12 +1,14 @@
-import { Body, Controller, Headers, Post, Res } from "@nestjs/common";
+import { Body, Controller, Get, Headers, Param, Post, Res } from "@nestjs/common";
 import { z } from "zod";
 import { parseInput } from "../../shared/http/parse-input";
 import { newId } from "../../shared/infra/ids";
+import { GetWagerTransactionUseCase } from "../application/get-wager-transaction.use-case";
 import {
   ProcessWagerResult,
   ProcessWagerTransactionUseCase,
 } from "../application/process-wager-transaction.use-case";
 import { WagerTransactionStatus } from "../domain/wager-transaction";
+import { toWagerTransactionView } from "./wager-transaction.view";
 
 const HeadersSchema = z.object({
   idempotencyKey: z.string().min(1).max(255),
@@ -25,13 +27,18 @@ const WagerBodySchema = z.object({
   referenceExternalTransactionId: z.string().min(1).max(200).optional(),
 });
 
+const TransactionIdSchema = z.object({ transactionId: z.uuid() });
+
 interface StatusSettable {
   status(code: number): unknown;
 }
 
 @Controller("wagering/transactions")
 export class WageringController {
-  constructor(private readonly processWager: ProcessWagerTransactionUseCase) {}
+  constructor(
+    private readonly processWager: ProcessWagerTransactionUseCase,
+    private readonly getWagerTransaction: GetWagerTransactionUseCase,
+  ) {}
 
   @Post()
   async submit(
@@ -51,6 +58,12 @@ export class WageringController {
 
     response.status(statusFor(result));
     return result;
+  }
+
+  @Get(":transactionId")
+  async findOne(@Param("transactionId") transactionId: string) {
+    const { transactionId: id } = parseInput(TransactionIdSchema, { transactionId });
+    return toWagerTransactionView(await this.getWagerTransaction.byId(id));
   }
 }
 
