@@ -76,9 +76,10 @@ Os testes de integração aplicam as migrations automaticamente e criam carteira
 - conflito de idempotência, atomicidade com a outbox e constraints do banco;
 - consumo da fila com inbox: reentrega após commit sem efeito duplicado, erro de negócio confirmado, mensagem malformada na DLQ e falha transitória com retry até a DLQ;
 - publicação da outbox no SQS, **dois publishers concorrentes** sobre a mesma outbox, instância que morre com eventos reivindicados e retry com backoff após falha do broker;
-- extrato paginado, consultas e reconciliação.
+- extrato paginado, consultas e reconciliação;
+- todas as migrations aplicadas, revertidas e reaplicadas em um schema vazio e isolado.
 
-Todos verificam a invariante `saldo da carteira == saldo reconstruído pelo extrato`.
+Os testes de operações financeiras verificam a invariante `saldo da carteira == saldo reconstruído pelo extrato`.
 
 ### Verificação manual
 

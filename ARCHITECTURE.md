@@ -4,7 +4,7 @@
 
 O Distributed Wagering Processor é um serviço financeiro que processa as transações de apostas enviadas por provedores de jogos: `BET` (aposta), `WIN` (prêmio), `LOSS` (perda), `REFUND` (devolução) e `ROLLBACK` (desfazimento). Ele mantém a carteira de cada jogador e um extrato imutável, em que todo saldo pode ser reconstruído a partir dos lançamentos. Os valores monetários são representados por um objeto de valor próprio (`Money`), que trafega como string e é calculado com decimal, sem nunca passar por `number`, para evitar erros de arredondamento. As regras críticas, como saldo não negativo e extrato imutável, são garantidas também por constraints e triggers no PostgreSQL, como última camada de defesa.
 
-O foco do projeto é permanecer correto diante de requisições duplicadas, simultâneas e distribuídas entre várias instâncias. A idempotência persistente garante que uma mesma operação tenha um único efeito, devolvendo a resposta original em caso de reenvio. O lock pessimista por carteira serializa as operações da mesma carteira, enquanto carteiras diferentes são processadas em paralelo. Os eventos são publicados no SQS FIFO pelo padrão Transactional Outbox, sem risco de perda entre a operação financeira e a publicação, e as transações também podem chegar pela fila, por um consumidor com inbox, retry e DLQ. A entrega inclui 117 testes, que exercitam a concorrência contra o PostgreSQL e o SQS reais (inclusive com 3 processos separados disputando a mesma carteira), além de logs estruturados, métricas no formato Prometheus e health checks.
+O foco do projeto é permanecer correto diante de requisições duplicadas, simultâneas e distribuídas entre várias instâncias. A idempotência persistente garante que uma mesma operação tenha um único efeito, devolvendo a resposta original em caso de reenvio. O lock pessimista por carteira serializa as operações da mesma carteira, enquanto carteiras diferentes são processadas em paralelo. Os eventos são publicados no SQS FIFO pelo padrão Transactional Outbox, sem risco de perda entre a operação financeira e a publicação, e as transações também podem chegar pela fila, por um consumidor com inbox, retry e DLQ. A entrega inclui 118 testes, que exercitam a concorrência contra o PostgreSQL e o SQS reais (inclusive com 3 processos separados disputando a mesma carteira), além de logs estruturados, métricas no formato Prometheus e health checks.
 
 As decisões e seus trade-offs estão na seção 2, o que ficou fora do escopo na seção 3 e as limitações conhecidas na seção 4. As instruções de execução estão no `README.md`.
 
@@ -57,6 +57,8 @@ As reversões (`REFUND` e `ROLLBACK`) têm códigos próprios (D16), como `REFER
 ### D8 — Schema e constraints no banco
 
 As migrations são escritas à mão porque o gerador do MikroORM não cria várias das proteções necessárias, e assim cada regra fica visível no código. O banco garante saldo não negativo, uma carteira por jogador e moeda, a conta do extrato, a moeda do lançamento igual à da carteira e aritmética exata com `numeric`. O extrato é imutável: um trigger cancela qualquer `UPDATE` ou `DELETE`, e outro bloqueia o `TRUNCATE`, que apaga a tabela inteira sem passar linha por linha.
+
+A reversibilidade é coberta por um teste automatizado, que aplica, reverte e reaplica todas as migrations em um schema vazio e isolado, e confere que o resultado final é idêntico ao da primeira aplicação.
 
 O pacote oficial MikroORM + NestJS não foi usado porque declara dependência do NestJS 11, e o projeto usa o 12. Em vez de arriscar uma incompatibilidade, a integração foi feita manualmente, com pouco código.
 
@@ -188,8 +190,6 @@ A reconciliação existe (`POST /wallets/:walletId/reconciliation`), mas só rod
 - **ROLLBACK de uma reversão pendente.** Um `ROLLBACK` que referencia um `REFUND` ainda em `PENDING_REFERENCE` é recusado na hora com `REFERENCE_NOT_PROCESSED`, em vez de também aguardar.
 
 - **ROLLBACK de uma WIN já gasta.** É recusado com `REVERSAL_INSUFFICIENT_FUNDS`, para não quebrar a regra de saldo não negativo; a cobrança do jogador fica para um processo manual da operação (D16).
-
-- **Reversibilidade das migrations.** O `down` e o `up` foram verificados manualmente, e não por teste automatizado: uma migration futura pode ter um `down` quebrado sem que nenhum teste perceba. Correção: um teste que aplique, reverta e reaplique todas as migrations em um banco vazio.
 
 - **Sem teste de carga.** A concorrência foi validada por testes de integração (incluindo 3 processos separados disputando a mesma carteira), mas não sob carga sustentada. Correção: um cenário com k6 medindo latência e taxa de conflitos.
 
