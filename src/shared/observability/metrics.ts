@@ -64,3 +64,22 @@ export const outboxPublishRetriesTotal = new Counter({
   help: "Failed publish attempts scheduled for retry with backoff",
   registers: [metricsRegistry],
 });
+
+export const sqsMessagesConsumedTotal = new Counter({
+  name: "sqs_messages_consumed_total",
+  help: "Messages handled by the SQS consumer, by outcome",
+  labelNames: ["outcome"] as const,
+  registers: [metricsRegistry],
+});
+
+export const sqsMessageRetriesTotal = new Counter({
+  name: "sqs_message_retries_total",
+  help: "Messages left on the queue for redelivery after a transient failure",
+  registers: [metricsRegistry],
+});
+
+export const sqsDeadLetteredTotal = new Counter({
+  name: "sqs_dead_lettered_total",
+  help: "Messages sent to the dead letter queue by the consumer",
+  registers: [metricsRegistry],
+});

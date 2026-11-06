@@ -3,9 +3,10 @@ import { GetWagerTransactionUseCase } from "./application/get-wager-transaction.
 import { ProcessWagerTransactionUseCase } from "./application/process-wager-transaction.use-case";
 import { ProviderTransactionsController } from "./http/provider-transactions.controller";
 import { WageringController } from "./http/wagering.controller";
+import { SqsWagerConsumerWorker } from "./infra/sqs-wager-consumer.worker";
 
 @Module({
   controllers: [WageringController, ProviderTransactionsController],
-  providers: [ProcessWagerTransactionUseCase, GetWagerTransactionUseCase],
+  providers: [ProcessWagerTransactionUseCase, GetWagerTransactionUseCase, SqsWagerConsumerWorker],
 })
 export class WageringModule {}

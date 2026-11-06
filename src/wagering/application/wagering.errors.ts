@@ -31,3 +31,10 @@ export class WagerTransactionNotFoundError extends DomainError {
     super("wager transaction not found");
   }
 }
+export class DuplicateInboxMessageError extends DomainError {
+  override readonly code = "DUPLICATE_INBOX_MESSAGE";
+
+  constructor(messageId: string) {
+    super(`message ${messageId} was already processed`);
+  }
+}

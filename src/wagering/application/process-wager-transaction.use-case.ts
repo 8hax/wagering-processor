@@ -5,6 +5,8 @@ import { IntegrationEvent } from "../../shared/application/integration-event";
 import { payloadHash } from "../../shared/application/payload-hash";
 import { Money, MoneyProps } from "../../shared/domain/money";
 import { newId } from "../../shared/infra/ids";
+import { InboxMessage } from "../../shared/domain/inbox-message";
+import { INBOX_PRIMARY_KEY, insertInboxMessage } from "../../shared/infra/inbox.sql";
 import { insertOutboxEvents } from "../../shared/infra/outbox.sql";
 import {
   idempotencyConflictsTotal,
@@ -35,6 +37,7 @@ import {
   insertWagerTransaction,
 } from "../infra/wager-transaction.sql";
 import {
+  DuplicateInboxMessageError,
   IdempotencyConflictError,
   UnsupportedTransactionKindError,
   WalletMismatchError,
@@ -65,6 +68,11 @@ export interface ProcessWagerInput {
   referenceExternalTransactionId?: string;
 }
 
+export interface ProcessWagerOptions {
+  /** Presente quando a entrada vem da fila: gravado na mesma transação do efeito financeiro. */
+  inbox?: InboxMessage;
+}
+
 export interface ProcessWagerResult {
   transactionId: string;
   status: WagerTransactionStatus;
@@ -79,7 +87,10 @@ export class ProcessWagerTransactionUseCase {
 
   constructor(private readonly orm: MikroORM) {}
 
-  async execute(input: ProcessWagerInput): Promise<ProcessWagerResult> {
+  async execute(
+    input: ProcessWagerInput,
+    options: ProcessWagerOptions = {},
+  ): Promise<ProcessWagerResult> {
     const stopTimer = wagerProcessingDuration.startTimer();
     const context = {
       correlationId: input.correlationId,
@@ -90,7 +101,7 @@ export class ProcessWagerTransactionUseCase {
     };
 
     try {
-      const result = await this.executeOnce(input);
+      const result = await this.executeOnce(input, options);
 
       if (result.idempotentReplay) {
         idempotentReplaysTotal.inc();
@@ -124,7 +135,10 @@ export class ProcessWagerTransactionUseCase {
     }
   }
 
-  private async executeOnce(input: ProcessWagerInput): Promise<ProcessWagerResult> {
+  private async executeOnce(
+    input: ProcessWagerInput,
+    options: ProcessWagerOptions,
+  ): Promise<ProcessWagerResult> {
     if (!SUPPORTED_KINDS.has(input.kind)) {
       throw new UnsupportedTransactionKindError(input.kind);
     }
@@ -136,8 +150,11 @@ export class ProcessWagerTransactionUseCase {
     try {
       return await this.orm.em
         .fork()
-        .transactional((em) => this.processTransaction(em, input, kind, money, hash));
+        .transactional((em) => this.processTransaction(em, input, kind, money, hash, options));
     } catch (error) {
+      if (options.inbox && isUniqueViolation(error, INBOX_PRIMARY_KEY)) {
+        throw new DuplicateInboxMessageError(options.inbox.messageId);
+      }
       if (
         isUniqueViolation(error, "wager_tx_idempotency_key_unique") ||
         isUniqueViolation(error, "wager_tx_provider_external_unique")
@@ -154,8 +171,14 @@ export class ProcessWagerTransactionUseCase {
     kind: WagerTransactionKind,
     money: Money,
     hash: string,
+    options: ProcessWagerOptions,
   ): Promise<ProcessWagerResult> {
     const now = new Date();
+
+    if (options.inbox) {
+      options.inbox.markProcessed(now);
+      await insertInboxMessage(em, options.inbox);
+    }
 
     const wallet = await findWalletById(em, input.walletId, { forUpdate: true });
     if (!wallet) {

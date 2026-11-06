@@ -46,7 +46,12 @@ bun run dev
 
 Para desfazer a última migration: `bun run migration:down`.
 
-A aplicação já inicia o **publicador da outbox**, que publica os eventos de integração na fila FIFO `wagering-events.fifo` (criada automaticamente). Ele pode ser desligado com `OUTBOX_PUBLISHER_ENABLED=false`. O MiniStack foi escolhido no lugar do LocalStack porque não exige conta nem token.
+A aplicação inicia dois processos em segundo plano, ambos com as filas criadas automaticamente:
+
+- o **consumidor** da fila `wager-transactions.fifo`, que processa as mensagens `WagerTransactionRequested` com o mesmo use case da API HTTP (DLQ: `wager-transactions-dlq.fifo`). Desligável com `WAGER_CONSUMER_ENABLED=false`;
+- o **publicador da outbox**, que publica os eventos de integração na fila `wagering-events.fifo`. Desligável com `OUTBOX_PUBLISHER_ENABLED=false`.
+
+ O MiniStack foi escolhido no lugar do LocalStack porque não exige conta nem token.
 
 ## Testes
 
@@ -66,6 +71,7 @@ Os testes de integração aplicam as migrations automaticamente e criam carteira
 - carteiras distintas processadas em paralelo;
 - **3 processos separados** apostando na mesma carteira;
 - conflito de idempotência, atomicidade com a outbox e constraints do banco;
+- consumo da fila com inbox: reentrega após commit sem efeito duplicado, erro de negócio confirmado, mensagem malformada na DLQ e falha transitória com retry até a DLQ;
 - publicação da outbox no SQS, **dois publishers concorrentes** sobre a mesma outbox, instância que morre com eventos reivindicados e retry com backoff após falha do broker;
 - extrato paginado, consultas e reconciliação.
 
@@ -124,9 +130,9 @@ Valores monetários são sempre strings com duas casas decimais (`"25.00"`).
 
 ## Escopo desta entrega
 
-**Implementado:** `Money`, carteira e extrato imutável; criação de carteira com transação `OPENING`; operações `BET`, `WIN` e `LOSS` com lock por carteira, idempotência persistente e Transactional Outbox com publicador concorrente no SQS (retry com backoff); reconciliação; extrato paginado; consultas de transação; logs estruturados em JSON, métricas e health checks; ponto de extensão para autenticação.
+**Implementado:** `Money`, carteira e extrato imutável; criação de carteira com transação `OPENING`; operações `BET`, `WIN` e `LOSS` com lock por carteira, idempotência persistente e Transactional Outbox com publicador concorrente no SQS (retry com backoff); consumidor SQS com inbox na mesma transação, retry e DLQ; reconciliação; extrato paginado; consultas de transação; logs estruturados em JSON, métricas e health checks; ponto de extensão para autenticação.
 
-**Não implementado:** `REFUND` e `ROLLBACK` (recusadas com `501`), o consumidor SQS de entrada (com inbox), a DLQ e o reprocessamento de `PENDING_REFERENCE`. O schema já contempla essas partes, e o desenho de cada uma está descrito no `ARCHITECTURE.md`.
+**Não implementado:** `REFUND` e `ROLLBACK` (recusadas com `501`), e o reprocessamento de `PENDING_REFERENCE`. O schema já contempla essas partes, e o desenho de cada uma está descrito no `ARCHITECTURE.md`.
 
 ## Estrutura
 
