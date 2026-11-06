@@ -45,6 +45,12 @@ import {
   WalletBalanceChanged,
 } from "./wagering.events";
 
+const SUPPORTED_KINDS: ReadonlySet<string> = new Set([
+  WagerTransactionKind.Bet,
+  WagerTransactionKind.Win,
+  WagerTransactionKind.Loss,
+]);
+
 export interface ProcessWagerInput {
   idempotencyKey: string;
   correlationId: string;
@@ -119,9 +125,10 @@ export class ProcessWagerTransactionUseCase {
   }
 
   private async executeOnce(input: ProcessWagerInput): Promise<ProcessWagerResult> {
-    if (input.kind !== "BET") {
+    if (!SUPPORTED_KINDS.has(input.kind)) {
       throw new UnsupportedTransactionKindError(input.kind);
     }
+    const kind = input.kind as WagerTransactionKind;
 
     const money = Money.from(input.money);
     const hash = payloadHash(businessPayload(input));
@@ -129,7 +136,7 @@ export class ProcessWagerTransactionUseCase {
     try {
       return await this.orm.em
         .fork()
-        .transactional((em) => this.processBet(em, input, money, hash));
+        .transactional((em) => this.processTransaction(em, input, kind, money, hash));
     } catch (error) {
       if (
         isUniqueViolation(error, "wager_tx_idempotency_key_unique") ||
@@ -141,9 +148,10 @@ export class ProcessWagerTransactionUseCase {
     }
   }
 
-  private async processBet(
+  private async processTransaction(
     em: EntityManager,
     input: ProcessWagerInput,
+    kind: WagerTransactionKind,
     money: Money,
     hash: string,
   ): Promise<ProcessWagerResult> {
@@ -167,23 +175,14 @@ export class ProcessWagerTransactionUseCase {
       playerId: wallet.playerId,
       roundId: input.roundId,
       gameId: input.gameId,
-      kind: WagerTransactionKind.Bet,
+      kind,
       money,
       referenceExternalTransactionId: input.referenceExternalTransactionId,
       createdAt: now,
     });
 
     const previousVersion = wallet.version;
-    let entry: WalletLedgerEntry | undefined;
-    try {
-      entry = wallet.debit({ money, transactionId: transaction.id, entryId: newId(), at: now });
-      transaction.markProcessed(wallet.balance, now);
-    } catch (error) {
-      if (!(error instanceof InsufficientFundsError)) {
-        throw error;
-      }
-      transaction.reject("INSUFFICIENT_FUNDS", wallet.balance, now);
-    }
+    const entry = applyToWallet(wallet, transaction, now);
 
     await insertWagerTransaction(em, transaction);
     if (entry) {
@@ -201,6 +200,50 @@ export class ProcessWagerTransactionUseCase {
       throw new IdempotencyConflictError();
     }
     return toResult(existing, true);
+  }
+}
+
+/**
+ * Aplica a transação na carteira de acordo com o tipo e define o status final.
+ * Devolve o lançamento do extrato, ou undefined quando o saldo não muda.
+ */
+function applyToWallet(
+  wallet: Wallet,
+  transaction: WagerTransaction,
+  now: Date,
+): WalletLedgerEntry | undefined {
+  const movement = {
+    money: transaction.money,
+    transactionId: transaction.id,
+    entryId: newId(),
+    at: now,
+  };
+
+  switch (transaction.kind) {
+    case WagerTransactionKind.Bet: {
+      try {
+        const entry = wallet.debit(movement);
+        transaction.markProcessed(wallet.balance, now);
+        return entry;
+      } catch (error) {
+        if (!(error instanceof InsufficientFundsError)) {
+          throw error;
+        }
+        transaction.reject("INSUFFICIENT_FUNDS", wallet.balance, now);
+        return undefined;
+      }
+    }
+    case WagerTransactionKind.Win: {
+      const entry = wallet.credit(movement);
+      transaction.markProcessed(wallet.balance, now);
+      return entry;
+    }
+    case WagerTransactionKind.Loss: {
+      transaction.markProcessed(wallet.balance, now);
+      return undefined;
+    }
+    default:
+      throw new UnsupportedTransactionKindError(transaction.kind);
   }
 }
 
@@ -252,14 +295,20 @@ function buildEvents(
   };
   const base = { correlationId, causationId: transaction.id, occurredAt: now };
 
-  if (!entry) {
+  if (transaction.status === WagerTransactionStatus.Rejected) {
     return [
       new WagerTransactionRejected({ ...base, eventId: newId(), aggregateId: transaction.id, data: resultData }),
     ];
   }
 
-  return [
+  const events: IntegrationEvent<unknown>[] = [
     new WagerTransactionProcessed({ ...base, eventId: newId(), aggregateId: transaction.id, data: resultData }),
+  ];
+  if (!entry) {
+    return events;
+  }
+
+  events.push(
     new WalletBalanceChanged({
       ...base,
       eventId: newId(),
@@ -274,5 +323,6 @@ function buildEvents(
         walletVersion: wallet.version,
       },
     }),
-  ];
+  );
+  return events;
 }

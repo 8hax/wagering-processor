@@ -44,6 +44,14 @@ describe("WagerTransaction.create", () => {
     ).toThrow(InvalidWagerTransactionError);
   });
 
+  test("LOSS aceita valor zero, porque não mexe no saldo", () => {
+    const transaction = WagerTransaction.create(
+      props({ kind: WagerTransactionKind.Loss, money: brl("0.00") }),
+    );
+
+    expect(transaction.affectsBalance()).toBe(false);
+  });
+
   test("BET com valor zero é rejeitada", () => {
     expect(() => WagerTransaction.create(props({ money: brl("0.00") }))).toThrow(
       InvalidWagerTransactionError,

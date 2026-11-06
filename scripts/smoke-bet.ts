@@ -50,11 +50,19 @@ await call("3) mesma chave, valor diferente (esperado: 409, IDEMPOTENCY_CONFLICT
 await call("4) nova aposta de 80.00 sem saldo (esperado: 422, REJECTED, INSUFFICIENT_FUNDS)",
   "POST", "/wagering/transactions", bet(`bet-2-${run}`, "80.00"), key(`bet-2-${run}`));
 
-await call("5) uma WIN (esperado: 501, UNSUPPORTED_TRANSACTION_KIND)",
+await call("5a) uma WIN de 10.00 (esperado: 201, PROCESSED, saldo 30.00)",
   "POST", "/wagering/transactions", bet(`win-1-${run}`, "10.00", "WIN"), key(`win-1-${run}`));
+
+await call("5b) uma LOSS (esperado: 201, PROCESSED, saldo continua 30.00)",
+  "POST", "/wagering/transactions", bet(`loss-1-${run}`, "0.00", "LOSS"), key(`loss-1-${run}`));
+
+await call("5c) um REFUND (esperado: 501, UNSUPPORTED_TRANSACTION_KIND)",
+  "POST", "/wagering/transactions",
+  { ...bet(`refund-1-${run}`, "80.00", "REFUND"), referenceExternalTransactionId: `bet-1-${run}` },
+  key(`refund-1-${run}`));
 
 await call("6) sem Idempotency-Key (esperado: 400, INVALID_PAYLOAD)",
   "POST", "/wagering/transactions", bet(`bet-3-${run}`, "10.00"));
 
-await call("7) consultar a carteira (esperado: 200, saldo 20.00, versão 2)",
+await call("7) consultar a carteira (esperado: 200, saldo 30.00, versão 3)",
   "GET", `/wallets/${wallet.id}`);
