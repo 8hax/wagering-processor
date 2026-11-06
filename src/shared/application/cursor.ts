@@ -32,7 +32,8 @@ export function decodeCursor(raw: string): PageCursor {
       UUID.test(parsed.id) &&
       !Number.isNaN(Date.parse(parsed.createdAt))
     ) {
-      return { createdAt: parsed.createdAt, id: parsed.id };
+      // Normaliza para ISO-8601: o que o JavaScript aceita como data nem sempre o PostgreSQL aceita.
+      return { createdAt: new Date(parsed.createdAt).toISOString(), id: parsed.id };
     }
   } catch {
     // cai no erro abaixo

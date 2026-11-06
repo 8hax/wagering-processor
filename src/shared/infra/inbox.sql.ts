@@ -17,3 +17,16 @@ export async function insertInboxMessage(em: EntityManager, message: InboxMessag
     ],
   );
 }
+
+/** Impressão digital gravada para a mensagem, ou undefined se ela não estiver na inbox. */
+export async function findInboxPayloadHash(
+  em: EntityManager,
+  consumerName: string,
+  messageId: string,
+): Promise<string | undefined> {
+  const rows = (await em.execute(
+    `select payload_hash from inbox_messages where consumer_name = ? and message_id = ?`,
+    [consumerName, messageId],
+  )) as { payload_hash: string }[];
+  return rows[0]?.payload_hash;
+}

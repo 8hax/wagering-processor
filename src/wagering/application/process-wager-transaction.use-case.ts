@@ -6,7 +6,11 @@ import { payloadHash } from "../../shared/application/payload-hash";
 import { Money, MoneyProps } from "../../shared/domain/money";
 import { newId } from "../../shared/infra/ids";
 import { InboxMessage } from "../../shared/domain/inbox-message";
-import { INBOX_PRIMARY_KEY, insertInboxMessage } from "../../shared/infra/inbox.sql";
+import {
+  findInboxPayloadHash,
+  INBOX_PRIMARY_KEY,
+  insertInboxMessage,
+} from "../../shared/infra/inbox.sql";
 import { insertOutboxEvents } from "../../shared/infra/outbox.sql";
 import {
   idempotencyConflictsTotal,
@@ -178,6 +182,15 @@ export class ProcessWagerTransactionUseCase {
         .transactional((em) => this.processTransaction(em, input, kind, money, hash, options));
     } catch (error) {
       if (options.inbox && isUniqueViolation(error, INBOX_PRIMARY_KEY)) {
+        // Mesmo messageId com conteúdo diferente não é reentrega: é uso indevido do id.
+        const stored = await findInboxPayloadHash(
+          this.orm.em.fork(),
+          options.inbox.consumerName,
+          options.inbox.messageId,
+        );
+        if (stored !== options.inbox.payloadHash) {
+          throw new IdempotencyConflictError();
+        }
         throw new DuplicateInboxMessageError(options.inbox.messageId);
       }
       if (

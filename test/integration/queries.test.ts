@@ -68,6 +68,19 @@ describe("Extrato paginado por cursor", () => {
     ).toString("base64url");
     await expect(listLedger.execute(wallet.id, forgedId, 10)).rejects.toThrow(InvalidCursorError);
   });
+
+  test("cursor com data em formato que só o JavaScript entende ainda funciona", async () => {
+    const wallet = await createWallet.execute({
+      playerId: newId(),
+      initialBalance: { amount: "10.00", currency: "BRL" },
+    });
+    const looseDate = Buffer.from(
+      JSON.stringify({ createdAt: "2026", id: "00000000-0000-7000-8000-000000000000" }),
+    ).toString("base64url");
+
+    const page = await listLedger.execute(wallet.id, looseDate, 10);
+    expect(page.items).toHaveLength(1);
+  });
 });
 
 describe("Consulta de transações", () => {

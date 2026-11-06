@@ -232,3 +232,21 @@ describe("Consumidor SQS", () => {
     20_000,
   );
 });
+
+describe("Inbox: mesmo messageId com conteúdo diferente", () => {
+  test("não é tratado como reentrega: é recusado como conflito e não gera um segundo efeito", async () => {
+    const wallet = await openWallet();
+    const { consumer, queueUrl } = await newConsumer(processWager);
+    const original = wagerMessage(wallet, "10.00");
+    const reused = { ...wagerMessage(wallet, "30.00"), messageId: original.messageId };
+
+    await send(queueUrl, original);
+    expect(await consumer.pollOnce()).toEqual(["processed"]);
+    await send(queueUrl, reused);
+    expect(await consumer.pollOnce()).toEqual(["business-error"]);
+
+    expect(await debitsOf(wallet.id)).toBe(1);
+    expect(await messagesIn(queueUrl)).toBe(0);
+    consumer.destroy();
+  });
+});
