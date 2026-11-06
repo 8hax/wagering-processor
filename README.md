@@ -74,9 +74,9 @@ Os testes de integração aplicam as migrations automaticamente e criam carteira
 - carteiras distintas processadas em paralelo;
 - **3 processos separados** apostando na mesma carteira;
 - conflito de idempotência, atomicidade com a outbox e constraints do banco;
-- consumo da fila com inbox: reentrega após commit sem efeito duplicado, erro de negócio confirmado, mensagem malformada na DLQ e falha transitória com retry até a DLQ;
-- publicação da outbox no SQS, **dois publishers concorrentes** sobre a mesma outbox, instância que morre com eventos reivindicados e retry com backoff após falha do broker;
-- extrato paginado, consultas e reconciliação;
+- consumo da fila com inbox: reentrega após commit sem efeito duplicado, `messageId` reutilizado com outro conteúdo recusado como conflito, erro de negócio confirmado, mensagem malformada na DLQ e falha transitória com retry até a DLQ;
+- publicação da outbox no SQS, **dois publishers concorrentes** sobre a mesma outbox, instância que morre com eventos reivindicados, retry com backoff após falha do broker e fila recriada depois de deixar de existir;
+- extrato paginado (inclusive cursores adulterados), consultas e reconciliação;
 - todas as migrations aplicadas, revertidas e reaplicadas em um schema vazio e isolado.
 
 Os testes de operações financeiras verificam a invariante `saldo da carteira == saldo reconstruído pelo extrato`.
@@ -129,15 +129,16 @@ Valores monetários são sempre strings com duas casas decimais (`"25.00"`).
 
 ### Status HTTP
 
-| Situação | Status | Código (`code`) | O provedor deve |
+| Situação | Status | Na resposta | O provedor deve |
 |---|---|---|---|
 | Transação nova processada | `201` | — | — |
 | Replay de transação já processada | `200` | `idempotentReplay: true` (uma recusa repetida volta como `422`, e uma pendência como `202`) | — |
 | Reversão aguardando a transação referenciada | `202` | `status: PENDING_REFERENCE` | consultar depois |
-| Payload inválido | `400` | `INVALID_PAYLOAD`, `INVALID_MONEY`, `INVALID_CURSOR` | corrigir o payload |
+| Payload inválido | `400` | `INVALID_PAYLOAD`, `INVALID_MONEY`, `INVALID_WAGER_TRANSACTION`, `INVALID_CURSOR` (JSON malformado: `HTTP_400`) | corrigir o payload |
 | Recurso inexistente | `404` | `WALLET_NOT_FOUND`, `TRANSACTION_NOT_FOUND` | verificar o identificador |
 | Conflito | `409` | `IDEMPOTENCY_CONFLICT`, `WALLET_ALREADY_EXISTS` | não reenviar |
-| Rejeição por regra de negócio | `422` | `INSUFFICIENT_FUNDS`, `WALLET_MISMATCH`, `CURRENCY_MISMATCH`, `REFERENCE_ALREADY_REVERSED`, `AMOUNT_MISMATCH`, `INVALID_REFERENCE_KIND`, `REFERENCE_MISMATCH`, `REFERENCE_NOT_PROCESSED`, `REVERSAL_INSUFFICIENT_FUNDS`, `REFERENCE_NOT_FOUND` | desistir |
+| Carteira de outro jogador ou de outra moeda | `422` | `WALLET_MISMATCH` (nada é gravado) | corrigir o payload |
+| Transação recusada por regra de negócio | `422` | `status: REJECTED` com `failureCode`: `INSUFFICIENT_FUNDS`, `REFERENCE_ALREADY_REVERSED`, `AMOUNT_MISMATCH`, `INVALID_REFERENCE_KIND`, `REFERENCE_MISMATCH`, `REFERENCE_NOT_PROCESSED`, `REVERSAL_INSUFFICIENT_FUNDS`, `REFERENCE_NOT_FOUND` (a recusa é gravada) | desistir |
 | Falha transitória de infraestrutura | `503` | `SERVICE_UNAVAILABLE`, `CONCURRENT_WALLET_UPDATE` | reenviar mais tarde |
 
 ## Escopo desta entrega
@@ -155,7 +156,7 @@ src/
 ├── wagering/     transações de aposta      (domain · application · infra · http)
 ├── health/       liveness e readiness
 └── infra/        conexão com o banco e migrations
-test/integration/ testes contra o PostgreSQL real
+test/integration/ testes contra o PostgreSQL e o SQS reais
 scripts/          verificação manual e teste de carga pela API
 ```
 
