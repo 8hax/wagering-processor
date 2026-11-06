@@ -56,6 +56,59 @@ As migrations são escritas à mão porque o gerador do MikroORM não cria vári
 
 O pacote oficial MikroORM + NestJS não foi usado porque declara dependência do NestJS 11, e o projeto usa o 12. Em vez de arriscar uma incompatibilidade, a integração foi feita manualmente, com pouco código.
 
+### D9 — Lock pessimista por carteira
+
+A escolha do lock pessimista foi motivada pela natureza das operações financeiras do sistema. Uma mesma carteira pode receber múltiplas apostas em sequência (hot wallet), tornando importante serializar suas operações e evitar que diferentes transações utilizem simultaneamente o mesmo saldo disponível. Na prática, a carteira é lida com `SELECT ... FOR UPDATE` dentro da transação: as operações concorrentes esperam a vez e, ao prosseguir, já leem o saldo atualizado. Com lock otimista, as operações concorrentes falhariam ao salvar e precisariam de um laço de retry, o que seria frequente justamente nas carteiras mais disputadas.
+
+O bloqueio é realizado em nível de linha, evitando um lock global e permitindo que carteiras distintas sejam processadas concorrentemente.
+
+O controle de versão (`UPDATE ... WHERE version = ?`) funciona como uma camada adicional de detecção de conflitos, enquanto a constraint `balance >= 0` no banco representa a última barreira de integridade dos dados.
+
+A estratégia foi validada experimentalmente: com o `FOR UPDATE` removido, o controle de versão impediu o débito duplicado e o saldo negativo, mas recusas limpas (`422 INSUFFICIENT_FUNDS`) passaram a virar erros de concorrência (`503`). No mesmo experimento, as 50 cópias da mesma aposta continuaram gerando um único débito, mostrando que duplicação e concorrência são protegidas por mecanismos independentes: a idempotência pela unicidade no banco, e a concorrência pelo lock. 
+
+### D10 — SQL explícito em vez de entidades do ORM
+
+Foi utilizado SQL explícito (`em.execute`) tendo em vista o lock e o controle de versão, que são o centro da correção, para que fiquem visíveis e sob controle, e para controlar a conversão do dinheiro sem nunca passar por `number`: o banco devolve os valores como texto (`balance::text`), que entram direto no `Money.from`. Todos os valores são enviados como parâmetros, nunca concatenados ao SQL, o que protege contra SQL injection. O MikroORM continua cuidando do pool de conexões com o banco, das transações e das migrations. O custo é escrever à mão o mapeamento entre as linhas do banco e o domínio, com a vantagem de explicitar toda a operação, facilitando a revisão e a auditoria.
+
+
+### D11 — Idempotência persistente
+
+A idempotência evita que uma mesma operação, reenviada pelo provedor ou entregue mais de uma vez, seja processada duas vezes. A fonte da verdade é o header `Idempotency-Key`, gravado com constraint `UNIQUE` no banco (a combinação `provider_id` + `external_transaction_id` também é única). Em vez de conferir se a chave existe e depois inserir, o que deixa uma brecha entre os dois passos em que duas requisições simultâneas passariam pela verificação, a transação é inserida diretamente e o próprio banco recusa a segunda. A recusa vira um replay. Como a garantia está no banco, ela vale para qualquer número de instâncias.
+
+Para distinguir uma repetição de um uso indevido da mesma chave, cada transação guarda um `payloadHash`: o SHA-256 de um JSON canônico, com as chaves ordenadas recursivamente e os campos ausentes omitidos, calculado apenas sobre os campos de negócio. O header e o `correlationId` ficam de fora, pois são metadados de transporte e mudam a cada reenvio.
+
+Se o hash for igual, a requisição recebe o resultado original — o mesmo `transactionId`, status, `failureCode` e o saldo observado no momento do processamento, guardado em `observed_balance` —, com `idempotentReplay: true` e status `200`. Se o hash for diferente, é um conflito: a resposta é `409 IDEMPOTENCY_CONFLICT` e nada é processado.
+
+Transações recusadas por regra de negócio, como `INSUFFICIENT_FUNDS`, também são gravadas. Assim, o reenvio de uma operação recusada devolve a recusa original, mesmo que o saldo tenha mudado depois. O teste com 50 requisições idênticas em paralelo comprova o comportamento: um único processamento, 49 replays e um único débito.
+
+### D12 — Operações implementadas: BET, WIN e LOSS
+
+Estas são as operações que movem o sistema. A `BET` debita da carteira do jogador e, caso falte saldo, é recusada com `INSUFFICIENT_FUNDS`, mas a transação é gravada como `REJECTED` para posterior auditoria. A `WIN` credita. A `LOSS` é `PROCESSED` sem alterar saldo, versão ou extrato, pois o valor apostado já foi debitado pela `BET`.
+
+Todas reutilizam o mesmo fluxo, com lock, idempotência, outbox e uma única transação SQL. A diferença fica apenas na função `applyToWallet`, que decide o efeito de cada tipo na carteira.
+
+Toda transação processada gera o evento `WagerTransactionProcessed`. O `WalletBalanceChanged` é gerado somente quando o saldo de fato muda, por isso a `LOSS` não o gera. Uma transação recusada gera o `WagerTransactionRejected`.
+
+O status `PENDING` só existe em memória: a transação é gravada uma única vez, já no estado final, então ninguém de fora vê uma transação pela metade.
+
+`REFUND` e `ROLLBACK` são recusados com `501` (ver seção 3). A `WIN` aceita a referência opcional à aposta, mas ainda não a valida.
+
+### D13 — Observabilidade
+
+Os logs em JSON aproveitam o `ConsoleLogger` do próprio Nest, que já oferece essa saída como opção. Cada registro traz `correlationId`, `transactionId`, `walletId`, `providerId` e o resultado da operação, o suficiente para rastrear qualquer transação. Valores em dinheiro e o saldo do jogador não são registrados, por exigência de privacidade e segurança: os logs costumam circular por mais sistemas e pessoas do que o banco.
+
+As métricas são expostas em `GET /metrics`, no formato do Prometheus, que coleta os valores periodicamente e permite criar gráficos e alertas. Elas cobrem transações por tipo e status, replays, conflitos de idempotência, conflitos de concorrência, divergências de reconciliação, latência de processamento e o outbox lag (quantidade de eventos pendentes e idade do mais antigo, calculados no momento da coleta). Como o publicador da outbox ainda não existe, o lag cresce continuamente, que é exatamente o sinal que essa métrica deve dar quando o publicador para. Métricas de retries e de DLQ dependem do consumidor SQS e não foram implementadas.
+
+Quando ocorre um erro inesperado, o cliente recebe apenas `INTERNAL_ERROR`, e os detalhes vão para o log. Assim, nenhuma informação interna, como stack traces ou a estrutura do banco, é exposta a quem chama a API.
+
+### D14 — Autenticação não implementada
+
+A autenticação não foi implementada: o README indica que ela não vale pontos e não deve competir com o núcleo financeiro. Como ponto de extensão explícito, o `ProviderAuthGuard`, que hoje permite todas as requisições, já está aplicado aos controllers usados pelos provedores. Os endpoints de health e o `/metrics` ficam de fora de propósito, pois são acessados pelo orquestrador e pela ferramenta de monitoramento, sem credenciais.
+
+O desenho previsto é validar um token OIDC emitido por um Identity Provider externo, como o Keycloak: a aplicação verificaria a assinatura do token com as chaves públicas do IdP (JWKS) e passaria a exigir que o `providerId` do token seja igual ao do payload. Sem essa última verificação, um provedor autenticado poderia enviar transações em nome de outro.
+
+A escolha de um guard, e não de um middleware, se deve ao momento em que cada um atua: o guard roda depois da escolha da rota e sabe qual endpoint será executado, enquanto o middleware age antes, sem saber qual rota vai atender a requisição.
+
 ## 3. O que não foi implementado (e como seria feito)
 
 <!-- Preencher no final. -->
