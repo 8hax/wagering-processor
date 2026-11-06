@@ -52,3 +52,15 @@ export const outboxOldestPendingAgeSeconds = new Gauge({
   help: "Age of the oldest unpublished event (outbox lag)",
   registers: [metricsRegistry],
 });
+export const outboxPublishedTotal = new Counter({
+  name: "outbox_published_total",
+  help: "Integration events published to the broker",
+  labelNames: ["event_type"] as const,
+  registers: [metricsRegistry],
+});
+
+export const outboxPublishRetriesTotal = new Counter({
+  name: "outbox_publish_retries_total",
+  help: "Failed publish attempts scheduled for retry with backoff",
+  registers: [metricsRegistry],
+});

@@ -15,6 +15,7 @@ As decisões técnicas, os trade-offs e o que ficou fora do escopo estão em [`A
 | ORM e migrations | MikroORM 7 |
 | Dinheiro | decimal.js |
 | Validação de entrada | Zod |
+| Mensageria | AWS SQS (FIFO), emulado pelo MiniStack |
 | Métricas | prom-client (formato Prometheus) |
 | Orquestração local | Docker Compose |
 
@@ -32,9 +33,9 @@ bun install
 # 2. Variáveis de ambiente (o Bun carrega o .env automaticamente)
 cp .env.example .env
 
-# 3. Banco de dados
+# 3. PostgreSQL e SQS (MiniStack)
 docker compose up -d
-docker compose ps          # aguarde o status (healthy)
+docker compose ps          # aguarde o Postgres ficar (healthy)
 
 # 4. Migrations
 bun run migration:up
@@ -45,12 +46,14 @@ bun run dev
 
 Para desfazer a última migration: `bun run migration:down`.
 
+A aplicação já inicia o **publicador da outbox**, que publica os eventos de integração na fila FIFO `wagering-events.fifo` (criada automaticamente). Ele pode ser desligado com `OUTBOX_PUBLISHER_ENABLED=false`. O MiniStack foi escolhido no lugar do LocalStack porque não exige conta nem token.
+
 ## Testes
 
 ```bash
 bun run typecheck          # verificação de tipos
 bun run test:unit          # domínio puro, sem banco
-bun run test:integration   # contra o PostgreSQL real (requer o passo 3)
+bun run test:integration   # contra o PostgreSQL e o SQS reais (requer o passo 3)
 bun test                   # todos
 ```
 
@@ -63,6 +66,7 @@ Os testes de integração aplicam as migrations automaticamente e criam carteira
 - carteiras distintas processadas em paralelo;
 - **3 processos separados** apostando na mesma carteira;
 - conflito de idempotência, atomicidade com a outbox e constraints do banco;
+- publicação da outbox no SQS, **dois publishers concorrentes** sobre a mesma outbox, instância que morre com eventos reivindicados e retry com backoff após falha do broker;
 - extrato paginado, consultas e reconciliação.
 
 Todos verificam a invariante `saldo da carteira == saldo reconstruído pelo extrato`.
@@ -87,7 +91,7 @@ bun scripts/smoke-bet.ts
 | `GET` | `/wagering/transactions/:transactionId` | Consulta pelo id interno |
 | `GET` | `/providers/:providerId/wagering/transactions/:externalTransactionId` | Consulta pelo id do provedor |
 | `GET` | `/health/live` | O processo está vivo |
-| `GET` | `/health/ready` | O PostgreSQL está alcançável |
+| `GET` | `/health/ready` | O PostgreSQL e o SQS estão alcançáveis |
 | `GET` | `/metrics` | Métricas no formato Prometheus |
 
 ### Exemplo
@@ -120,9 +124,9 @@ Valores monetários são sempre strings com duas casas decimais (`"25.00"`).
 
 ## Escopo desta entrega
 
-**Implementado:** `Money`, carteira e extrato imutável; criação de carteira com transação `OPENING`; operações `BET`, `WIN` e `LOSS` com lock por carteira, idempotência persistente e Transactional Outbox; reconciliação; extrato paginado; consultas de transação; logs estruturados em JSON, métricas e health checks; ponto de extensão para autenticação.
+**Implementado:** `Money`, carteira e extrato imutável; criação de carteira com transação `OPENING`; operações `BET`, `WIN` e `LOSS` com lock por carteira, idempotência persistente e Transactional Outbox com publicador concorrente no SQS (retry com backoff); reconciliação; extrato paginado; consultas de transação; logs estruturados em JSON, métricas e health checks; ponto de extensão para autenticação.
 
-**Não implementado:** `REFUND` e `ROLLBACK` (recusadas com `501`), o consumidor SQS, o worker publicador da outbox, a DLQ e o reprocessamento de `PENDING_REFERENCE`. O schema já contempla essas partes, e o desenho de cada uma está descrito no `ARCHITECTURE.md`.
+**Não implementado:** `REFUND` e `ROLLBACK` (recusadas com `501`), o consumidor SQS de entrada (com inbox), a DLQ e o reprocessamento de `PENDING_REFERENCE`. O schema já contempla essas partes, e o desenho de cada uma está descrito no `ARCHITECTURE.md`.
 
 ## Estrutura
 

@@ -15,5 +15,11 @@ services:
       timeout: 3s
       retries: 10
 
+  # Emulador de AWS (SQS), alternativa ao LocalStack aceita pelo desafio, sem conta nem token
+  sqs:
+    image: ministackorg/ministack:1.5.38
+    ports:
+      - "127.0.0.1:4566:4566"
+
 volumes:
   pgdata:

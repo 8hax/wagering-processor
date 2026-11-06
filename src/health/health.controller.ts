@@ -1,9 +1,15 @@
 import { MikroORM } from "@mikro-orm/postgresql";
 import { Controller, Get, ServiceUnavailableException } from "@nestjs/common";
+import { EventPublisher } from "../shared/application/event-publisher";
+
+type CheckStatus = "up" | "down";
 
 @Controller("health")
 export class HealthController {
-  constructor(private readonly orm: MikroORM) {}
+  constructor(
+    private readonly orm: MikroORM,
+    private readonly eventPublisher: EventPublisher,
+  ) {}
 
   @Get("live")
   live() {
@@ -12,14 +18,24 @@ export class HealthController {
 
   @Get("ready")
   async ready() {
-    try {
-      await this.orm.em.fork().execute("select 1");
-    } catch {
-      throw new ServiceUnavailableException({
-        status: "unavailable",
-        checks: { database: "down" },
-      });
+    const [database, sqs] = await Promise.all([
+      this.check(() => this.orm.em.fork().execute("select 1")),
+      this.check(() => this.eventPublisher.ping()),
+    ]);
+    const checks = { database, sqs };
+
+    if (database === "down" || sqs === "down") {
+      throw new ServiceUnavailableException({ status: "unavailable", checks });
     }
-    return { status: "ok", checks: { database: "up" } };
+    return { status: "ok", checks };
+  }
+
+  private async check(probe: () => Promise<unknown>): Promise<CheckStatus> {
+    try {
+      await probe();
+      return "up";
+    } catch {
+      return "down";
+    }
   }
 }
