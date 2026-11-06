@@ -133,3 +133,49 @@ export async function updateWalletBalance(
     throw new ConcurrentWalletUpdateError();
   }
 }
+
+interface ReconciliationRow {
+  currency: string;
+  stored: string;
+  credits: string;
+  debits: string;
+  checked: string | number;
+}
+
+export interface ReconciliationSnapshot {
+  stored: Money;
+  calculated: Money;
+  checkedEntries: number;
+}
+
+export async function readReconciliationSnapshot(
+  em: EntityManager,
+  walletId: string,
+): Promise<ReconciliationSnapshot | undefined> {
+  const rows = (await em.execute(
+    `select w.currency,
+            w.balance::text as stored,
+            round(coalesce(sum(e.amount) filter (where e.direction = 'CREDIT'), 0), 2)::text as credits,
+            round(coalesce(sum(e.amount) filter (where e.direction = 'DEBIT'), 0), 2)::text as debits,
+            count(e.id) as checked
+       from wallets w
+       left join wallet_ledger_entries e on e.wallet_id = w.id
+      where w.id = ?
+      group by w.id`,
+    [walletId],
+  )) as ReconciliationRow[];
+
+  const row = rows[0];
+  if (!row) {
+    return undefined;
+  }
+
+  const credits = Money.from({ amount: row.credits, currency: row.currency });
+  const debits = Money.from({ amount: row.debits, currency: row.currency });
+
+  return {
+    stored: Money.from({ amount: row.stored, currency: row.currency }),
+    calculated: credits.subtract(debits),
+    checkedEntries: Number(row.checked),
+  };
+}

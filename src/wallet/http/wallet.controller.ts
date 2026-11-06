@@ -1,9 +1,11 @@
-import { Body, Controller, Get, Param, Post } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, Param, Post } from "@nestjs/common";
 import { z } from "zod";
 import { parseInput } from "../../shared/http/parse-input";
 import { CreateWalletUseCase } from "../application/create-wallet.use-case";
 import { GetWalletUseCase } from "../application/get-wallet.use-case";
 import { Wallet } from "../domain/wallet";
+import { ReconcileWalletUseCase } from "../application/reconcile-wallet.use-case";
+
 
 const MoneyBodySchema = z.object({
   amount: z.string(),
@@ -22,6 +24,7 @@ export class WalletController {
   constructor(
     private readonly createWallet: CreateWalletUseCase,
     private readonly getWallet: GetWalletUseCase,
+    private readonly reconcileWallet: ReconcileWalletUseCase,
   ) {}
 
   @Post()
@@ -29,6 +32,13 @@ export class WalletController {
     const input = parseInput(CreateWalletBodySchema, body);
     const wallet = await this.createWallet.execute(input);
     return toWalletResponse(wallet);
+  }
+
+  @Post(":walletId/reconciliation")
+  @HttpCode(200)
+  async reconcile(@Param("walletId") walletId: string) {
+    const { walletId: id } = parseInput(WalletIdSchema, { walletId });
+    return this.reconcileWallet.execute(id);
   }
 
   @Get(":walletId")
