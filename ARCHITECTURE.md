@@ -2,11 +2,13 @@
 
 ## 1. Visão geral
 
-<!-- Escrever no final: o que o sistema faz, em um parágrafo, e o que foi entregue. -->
+O Distributed Wagering Processor é um serviço financeiro que processa as transações de apostas enviadas por provedores de jogos: `BET` (aposta), `WIN` (prêmio), `LOSS` (perda), `REFUND` (devolução) e `ROLLBACK` (desfazimento). Ele mantém a carteira de cada jogador e um extrato imutável, em que todo saldo pode ser reconstruído a partir dos lançamentos. Os valores monetários são representados por um objeto de valor próprio (`Money`), que trafega como string e é calculado com decimal, sem nunca passar por `number`, para evitar erros de arredondamento. As regras críticas, como saldo não negativo e extrato imutável, são garantidas também por constraints e triggers no PostgreSQL, como última camada de defesa.
+
+O foco do projeto é permanecer correto diante de requisições duplicadas, simultâneas e distribuídas entre várias instâncias. A idempotência persistente garante que uma mesma operação tenha um único efeito, devolvendo a resposta original em caso de reenvio. O lock pessimista por carteira serializa as operações da mesma carteira, enquanto carteiras diferentes são processadas em paralelo. Os eventos são publicados no SQS FIFO pelo padrão Transactional Outbox, sem risco de perda entre a operação financeira e a publicação, e as transações também podem chegar pela fila, por um consumidor com inbox, retry e DLQ. A entrega inclui 114 testes, que exercitam a concorrência contra o PostgreSQL e o SQS reais (inclusive com 3 processos separados disputando a mesma carteira), além de logs estruturados, métricas no formato Prometheus e health checks.
+
+As decisões e seus trade-offs estão na seção 2, o que ficou fora do escopo na seção 3 e as limitações conhecidas na seção 4. As instruções de execução estão no `README.md`.
 
 ## 2. Diário de decisões
-
-<!-- Cada decisão: o que foi decidido, por quê, qual alternativa existia e qual o custo da escolha. -->
 
 ### D1 — Versão fixa do PostgreSQL (17-alpine)
 
@@ -131,40 +133,65 @@ Essa abordagem evita a perda de eventos entre a confirmação da operação fina
 
 ### D16 — Reversões: REFUND, ROLLBACK e PENDING_REFERENCE
 
-<!-- Escrever com os ingredientes:
-     1. Problema: a reversão pode chegar antes da original, ou duas vezes.
-     2. Decisão: a reversão é uma transação nova que aponta para a original (reference_transaction_id);
-        o saldo é corrigido por um lançamento novo no extrato, nunca alterando o antigo.
-        REFUND só reverte BET (credita); ROLLBACK reverte BET, WIN ou REFUND (movimento inverso).
-     3. No máximo uma reversão por transação: checagem dentro do lock da carteira + índice único parcial
-        no banco como última defesa (teste: 5 REFUNDs em paralelo, 1 aplicado, 4 REFERENCE_ALREADY_REVERSED).
-     4. Fora de ordem: 202 PENDING_REFERENCE, sem mexer no saldo; worker com FOR UPDATE SKIP LOCKED tenta
-        de novo com backoff (2s dobrando até 5 min); após 10 tentativas, REJECTED com REFERENCE_NOT_FOUND.
-        Sem prazo, uma pendência ficaria esperando para sempre.
-     5. Códigos: AMOUNT_MISMATCH, INVALID_REFERENCE_KIND, REFERENCE_MISMATCH, REFERENCE_NOT_PROCESSED,
-        REFERENCE_ALREADY_REVERSED, REVERSAL_INSUFFICIENT_FUNDS, REFERENCE_NOT_FOUND (todos 422).
-     6. Trade-off: ROLLBACK de uma WIN já gasta é recusado (REVERSAL_INSUFFICIENT_FUNDS) em vez de deixar
-        saldo negativo; a cobrança fica para a operação. -->
+O provedor pode precisar desfazer uma operação: o `REFUND` devolve uma aposta cancelada (só pode referenciar uma `BET`, e credita o valor), e o `ROLLBACK` desfaz uma operação que não deveria ter existido (pode referenciar `BET`, `WIN` ou `REFUND`, e faz o movimento inverso da original). As reversões nunca apagam nada: são transações novas que apontam para a original (`reference_transaction_id`) e corrigem o saldo com um novo lançamento no extrato, que continua imutável.
+
+Cada transação pode ser revertida no máximo uma vez, qualquer que seja o tipo da reversão. Isso impede, por exemplo, que um `REFUND` e um `ROLLBACK` da mesma `BET` creditem o valor da aposta duas vezes. A regra é verificada dentro do lock da carteira e garantida também por um índice único parcial no banco, como última defesa. Uma primeira versão aplicava a regra por tipo e permitia exatamente esse crédito em dobro; um teste de `REFUND` seguido de `ROLLBACK` expôs o problema, e a correção foi feita no código e no índice, por meio de uma nova migration.
+
+Toda reversão é validada contra a original: valor, tipo, carteira, jogador, rodada e status. Cada problema tem um código próprio (`AMOUNT_MISMATCH`, `INVALID_REFERENCE_KIND`, `REFERENCE_MISMATCH`, `REFERENCE_NOT_PROCESSED`, `REFERENCE_ALREADY_REVERSED`), porque cada um pede uma ação diferente de quem opera: uma duplicata pode ser ignorada, enquanto um valor divergente indica erro no provedor.
+
+Em um sistema distribuído, a reversão pode chegar antes da original. Aplicá-la às cegas seria imprudente, e recusá-la na hora perderia uma devolução legítima que ainda está a caminho. Por isso, ela é gravada como `PENDING_REFERENCE`, sem alterar o saldo, e a API responde `202`. Um worker em segundo plano, que usa `FOR UPDATE SKIP LOCKED` como o publicador da outbox, tenta novamente com backoff exponencial (de 2 segundos até 5 minutos). Se a original chegar, a reversão é validada e aplicada normalmente; após 10 tentativas sem ela, é recusada com `REFERENCE_NOT_FOUND`, para que nenhuma pendência fique esperando para sempre.
+
+O trade-off mais delicado é o `ROLLBACK` de uma `WIN` cujo valor o jogador já apostou: desfazê-la deixaria o saldo negativo. O sistema recusa com `REVERSAL_INSUFFICIENT_FUNDS` e preserva a regra de saldo não negativo, deixando a cobrança para a operação, em vez de criar uma dívida automática na carteira.
 
 ## 3. O que não foi implementado (e como seria feito)
 
-<!-- Preencher no final. -->
+### Réplicas da aplicação no Docker Compose
+
+Hoje o Compose sobe apenas o PostgreSQL e o SQS (MiniStack), e a aplicação roda com `bun run dev`. A correção com várias instâncias não depende disso: toda a coordenação acontece no PostgreSQL (lock por carteira, unicidade da idempotência, `FOR UPDATE SKIP LOCKED` na outbox e nas pendências), e o teste com 3 processos separados disputando a mesma carteira comprova o comportamento.
+
+Para subir réplicas reais, o caminho seria:
+
+- um `Dockerfile` baseado na imagem oficial do Bun, executando `bun src/main.ts`;
+- um serviço `migrate`, de execução única, que aplica as migrations antes de qualquer réplica subir, para que várias instâncias não tentem migrar o banco ao mesmo tempo;
+- um serviço `app` com `deploy.replicas: 3`, apontando para `postgres` e `sqs` pelos nomes da rede interna do Compose, com `depends_on` condicionado ao healthcheck do banco, do SQS e ao término do `migrate`;
+- um balanceador (nginx ou Traefik) como única porta exposta, distribuindo as requisições entre as réplicas e usando o `/health/ready` para tirar do ar uma instância sem dependências.
+
+### Autenticação dos provedores
+
+Descrita na D14: o `ProviderAuthGuard` já está aplicado aos controllers como ponto de extensão. A implementação validaria um token OIDC emitido por um Identity Provider (por exemplo, Keycloak), verificando a assinatura pelas chaves públicas (JWKS), e exigiria que o `providerId` do token fosse igual ao do payload, para que um provedor autenticado não possa enviar transações em nome de outro. No consumidor SQS, a mesma garantia viria do controle de acesso à fila (IAM), e não de um token por mensagem.
+
+### Teste de carga
+
+A concorrência foi validada por testes de integração, mas não sob carga sustentada. Um cenário com k6 cobriria três situações: muitas carteiras em paralelo (vazão), uma carteira muito disputada (o pior caso do lock pessimista) e reenvios em massa da mesma transação (idempotência). As métricas observadas seriam a latência p95/p99 em `wagering_processing_duration_seconds`, a taxa de respostas `503`, os conflitos de concorrência e o outbox lag, para identificar o limite de vazão por carteira e por instância.
+
+### Reprocessamento da DLQ
+
+Mensagens que esgotam as tentativas ou chegam malformadas vão para a DLQ e ficam lá. Não há uma ferramenta para inspecioná-las e devolvê-las à fila principal. A implementação seria um comando operacional que lista as mensagens da DLQ com o motivo registrado e as reenvia sob demanda (ou usa o redrive nativo da AWS). O reenvio é seguro, porque a inbox e a idempotência impedem que uma mensagem já processada gere um segundo efeito financeiro.
+
+### Reconciliação agendada
+
+A reconciliação existe (`POST /wallets/:walletId/reconciliation`), mas só roda quando é chamada. Em produção, um job periódico percorreria as carteiras movimentadas desde a última execução, comparando o saldo com o extrato, e emitiria a métrica de divergência para disparar um alerta. Assim como hoje, o job apenas sinalizaria: uma divergência em um sistema financeiro deve ser investigada por uma pessoa, e não corrigida automaticamente.
 
 ## 4. Limitações conhecidas
 
-<!-- - A chave de idempotência é única no sistema todo, e não por provedor: dois provedores com a mesma chave
-       colidem (o segundo recebe 409). Não há vazamento, porque o hash inclui o providerId. Correção:
-       unique (provider_id, idempotency_key).
-     - Erros transitórios embrulhados pelo MikroORM: o filtro HTTP reconhece falhas pelo `code`; um deadlock
-       pode chegar dentro de uma classe do ORM e virar 500 em vez de 503. Com o lock por carteira, deadlocks
-       são improváveis.
-     - A inbox registra só mensagens que chegaram a processar; uma duplicata detectada pela idempotency key
-       (messageId diferente, mesma operação) é confirmada sem registro na inbox — a idempotência continua
-       garantindo o efeito único.
-     - A WIN não valida a BET referenciada.
-     - O prazo de PENDING_REFERENCE é contado em número de tentativas (10, backoff até 5 min), e não em
-       tempo de negócio definido pelo provedor.
-     - ROLLBACK de uma WIN já gasta é recusado; a cobrança do jogador fica para um processo manual.
-     - A reversibilidade das migrations foi verificada manualmente (down/up), não por teste automatizado.
-     - Não há teste de carga (diferencial opcional).
-     - O comportamento do SQS foi validado no MiniStack, e não na AWS real. -->
+- **Chave de idempotência global.** A chave é única no sistema inteiro, e não por provedor: dois provedores que usem a mesma chave colidem, e o segundo recebe `409`. Não há vazamento de dados entre eles, porque o hash do payload inclui o `providerId`. Correção: unicidade por `(provider_id, idempotency_key)`.
+
+- **Erros transitórios embrulhados pelo ORM.** O filtro HTTP reconhece falhas transitórias pelo `code` do PostgreSQL; um deadlock que chegue embrulhado em uma classe de erro do MikroORM pode virar `500` em vez de `503`. Com o lock por carteira, deadlocks são improváveis. Correção: desembrulhar a causa original do erro antes de classificá-lo.
+
+- **Inbox e duplicatas detectadas pela idempotência.** A inbox registra apenas mensagens que chegaram a ser processadas. Uma mensagem com `messageId` diferente, mas com a mesma operação, é detectada pela chave de idempotência e confirmada sem registro na inbox. O efeito financeiro continua único; falta apenas o rastro na inbox.
+
+- **WIN sem validação da BET.** A `WIN` aceita a referência à aposta, mas não verifica se ela existe ou pertence à mesma rodada. Correção: reaproveitar a validação de referência já usada pelas reversões (D16).
+
+- **Prazo de `PENDING_REFERENCE` contado em tentativas.** O limite é de 10 tentativas com backoff (até 5 minutos entre elas), e não um prazo de negócio definido pelo provedor. Se a original chegar depois da última tentativa, a reversão já terá sido recusada com `REFERENCE_NOT_FOUND`, e o provedor precisará reenviá-la.
+
+- **Pendência que falha sempre (poison pill).** Se o reprocessamento de uma pendência lançar um erro inesperado, a transação é desfeita sem registrar a tentativa; por ser a mais antiga, ela é tentada de novo e atrasa as demais. Nenhum caminho conhecido provoca esse erro, porque valores e referências são validados antes. Correção: registrar a tentativa em uma transação separada, antes do processamento.
+
+- **ROLLBACK de uma reversão pendente.** Um `ROLLBACK` que referencia um `REFUND` ainda em `PENDING_REFERENCE` é recusado na hora com `REFERENCE_NOT_PROCESSED`, em vez de também aguardar.
+
+- **ROLLBACK de uma WIN já gasta.** É recusado com `REVERSAL_INSUFFICIENT_FUNDS`, para não quebrar a regra de saldo não negativo; a cobrança do jogador fica para um processo manual da operação (D16).
+
+- **Reversibilidade das migrations.** O `down` e o `up` foram verificados manualmente, e não por teste automatizado: uma migration futura pode ter um `down` quebrado sem que nenhum teste perceba. Correção: um teste que aplique, reverta e reaplique todas as migrations em um banco vazio.
+
+- **Sem teste de carga.** A concorrência foi validada por testes de integração (incluindo 3 processos separados disputando a mesma carteira), mas não sob carga sustentada. Correção: um cenário com k6 medindo latência e taxa de conflitos.
+
+- **SQS validado apenas no MiniStack.** Não havia conta AWS no escopo do desafio. Na AWS real, podem variar limites, latência, janela de deduplicação e permissões (IAM), que o emulador não reproduz por completo.
